@@ -1,5 +1,6 @@
 # ==========================================================================================
 # APPLICATION "AUTO KYC" - VERSION DE PRODUCTION DÉFINITIVE
+# AVEC LA CORRECTION FINALE DE L'IMPORTATION MISTRAL
 # ==========================================================================================
 
 import streamlit as st
@@ -12,7 +13,8 @@ import io
 import base64
 import os
 
-from mistralai.client import Mistral
+# <<< LA CORRECTION DÉFINITIVE EST ICI : L'IMPORTATION EST DIRECTE >>>
+from mistralai import Mistral
 
 # --- Importations locales (modèle de détection) ---
 from torchvision.models.detection import fasterrcnn_resnet50_fpn
@@ -34,11 +36,9 @@ def load_detection_model():
         in_features = model.roi_heads.box_predictor.cls_score.in_features
         model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes=2)
         
-        # <<< LA CORRECTION DÉFINITIVE EST ICI >>>
-        # Le fichier .pth est directement le state_dict, pas un checkpoint.
-        # On le charge donc directement dans le modèle.
+        # On charge directement le dictionnaire des poids (state_dict)
         state_dict = torch.load(MODEL_PATH, map_location=DEVICE)
-        model.load_state_dict(state_dict)
+        model.load_state_dict(state_dict) 
         
         model.to(DEVICE)
         model.eval()
@@ -53,6 +53,7 @@ def load_llm_client():
     """Initialise le client Mistral AI."""
     try:
         api_key = st.secrets["MISTRAL_API_KEY"]
+        # L'instanciation de la classe "Mistral" est correcte.
         client = Mistral(api_key=api_key)
         print("Client Mistral AI initialisé.")
         return client
@@ -60,8 +61,8 @@ def load_llm_client():
         st.error(f"Erreur d'initialisation du client Mistral. Avez-vous configuré .streamlit/secrets.toml ? Erreur: {e}")
         return None
 
-# --- PIPELINE DE TRAITEMENT (INCHANGÉ) ---
-# ... (Toutes les autres fonctions : detect_cni, get_raw_text_from_image, structure_and_merge_texts, authenticate_cni_image, etc. sont parfaites) ...
+# --- PIPELINE DE TRAITEMENT ---
+
 def detect_cni(model, pil_image):
     image_tensor = T.Compose([T.ToImage(), T.ToDtype(torch.float32, scale=True)])(pil_image).to(DEVICE)
     with torch.no_grad():
