@@ -1,6 +1,17 @@
+# requirements.txt - Version optimisée pour Streamlit Cloud
+
+# Framework web
 streamlit
-torch
-torchvision
-opencv-python
+
+# Moteur OCR et Structuration
 mistralai
 Pillow
+
+# Computer Vision (versions "headless" et "cpu" pour la compatibilité)
+opencv-python-headless
+torch==2.1.0+cpu
+torchvision==0.16.0+cpu
+
+# Note: On spécifie des versions CPU de torch et torchvision
+# car les serveurs gratuits de Streamlit n'ont pas de GPU.
+# Ceci garantit une installation rapide et sans erreur. 
