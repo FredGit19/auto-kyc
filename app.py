@@ -33,8 +33,8 @@ def load_detection_model():
         model = fasterrcnn_resnet50_fpn(weights=None)
         in_features = model.roi_heads.box_predictor.cls_score.in_features
         model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes=2)
-        checkpoint = torch.load(MODEL_PATH, map_location=DEVICE)
-        model.load_state_dict(checkpoint['model_state_dict'])
+        state_dict = torch.load(MODEL_PATH, map_location=DEVICE)
+        model.load_state_dict(state_dict)
         model.to(DEVICE)
         model.eval()
         print("Modèle de détection chargé.")
