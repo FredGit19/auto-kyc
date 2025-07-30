@@ -1,6 +1,6 @@
 # ==========================================================================================
 # APPLICATION "AUTO KYC" - VERSION EXPERT POUR SECTEUR BANCAIRE
-# Architecture haute performance et analyse intelligente
+# Architecture de contrôle renforcée pour une fiabilité maximale
 # ==========================================================================================
 
 import streamlit as st
@@ -32,7 +32,7 @@ TILE_OVERLAP = 100
 # --- CHARGEMENT OPTIMISÉ DES RESSOURCES ---
 @st.cache_resource
 def load_detection_model():
-    """Charge le modèle de détection de CNI."""
+    # ... (inchangé, ce code est robuste)
     try:
         model = fasterrcnn_resnet50_fpn(weights=None)
         in_features = model.roi_heads.box_predictor.cls_score.in_features
@@ -50,7 +50,7 @@ def load_detection_model():
 
 @st.cache_resource
 def load_llm_client():
-    """Initialise le client Mistral AI."""
+    # ... (inchangé, ce code est robuste)
     try:
         client = Mistral(api_key=st.secrets["MISTRAL_API_KEY"])
         print("Client Mistral AI initialisé.")
@@ -61,7 +61,7 @@ def load_llm_client():
 
 # --- PIPELINE DE TRAITEMENT D'IMAGE "OUT-OF-CORE" ---
 def detect_on_tile(model, tile_pil):
-    """Exécute la détection sur une seule tuile (format PIL)."""
+    # ... (inchangé, ce code est robuste)
     image_tensor = T.Compose([T.ToImage(), T.ToDtype(torch.float32, scale=True)])(tile_pil).to(DEVICE)
     with torch.no_grad():
         prediction = model([image_tensor])
@@ -75,19 +75,14 @@ def detect_on_tile(model, tile_pil):
     return best_box
 
 def process_large_image_in_tiles(model, image_path):
-    """Scanne une image volumineuse par tuiles sans la charger en mémoire."""
+    # ... (inchangé, ce code est robuste)
     try:
         vips_image = pyvips.Image.new_from_file(image_path, access='sequential')
         width, height = vips_image.width, vips_image.height
         thumbnail_vips = vips_image.thumbnail_image(800)
-        thumbnail_np = np.ndarray(
-            buffer=thumbnail_vips.write_to_memory(),
-            dtype=np.uint8, 
-            shape=[thumbnail_vips.height, thumbnail_vips.width, thumbnail_vips.bands]
-        )
+        thumbnail_np = np.ndarray(buffer=thumbnail_vips.write_to_memory(),dtype=np.uint8, shape=[thumbnail_vips.height, thumbnail_vips.width, thumbnail_vips.bands])
         if thumbnail_np.shape[2] == 4: thumbnail_np = cv2.cvtColor(thumbnail_np, cv2.COLOR_RGBA2BGR)
         else: thumbnail_np = cv2.cvtColor(thumbnail_np, cv2.COLOR_RGB2BGR)
-
         for y in range(0, height, TILE_SIZE - TILE_OVERLAP):
             for x in range(0, width, TILE_SIZE - TILE_OVERLAP):
                 tile_width, tile_height = min(TILE_SIZE, width - x), min(TILE_SIZE, height - y)
@@ -99,10 +94,7 @@ def process_large_image_in_tiles(model, image_path):
                 if box is not None:
                     global_box = (x + box[0], y + box[1], x + box[2], y + box[3])
                     scale_x, scale_y = thumbnail_np.shape[1] / width, thumbnail_np.shape[0] / height
-                    cv2.rectangle(thumbnail_np, 
-                                  (int(global_box[0] * scale_x), int(global_box[1] * scale_y)), 
-                                  (int(global_box[2] * scale_x), int(global_box[3] * scale_y)), 
-                                  (0, 255, 0), 3)
+                    cv2.rectangle(thumbnail_np, (int(global_box[0] * scale_x), int(global_box[1] * scale_y)), (int(global_box[2] * scale_x), int(global_box[3] * scale_y)), (0, 255, 0), 3)
                     return global_box, thumbnail_np
         return None, thumbnail_np
     except pyvips.error.VipsError as e:
@@ -110,7 +102,7 @@ def process_large_image_in_tiles(model, image_path):
         return None, None
     
 def get_crop_from_large_file(image_path, box_coords):
-    """Extrait la zone de la CNI depuis le fichier volumineux sur disque."""
+    # ... (inchangé, ce code est robuste)
     x1, y1, x2, y2 = map(int, box_coords)
     crop_vips = pyvips.Image.new_from_file(image_path).crop(x1, y1, x2 - x1, y2 - y1)
     crop_np = np.ndarray(buffer=crop_vips.write_to_memory(), dtype=np.uint8, shape=[crop_vips.height, crop_vips.width, crop_vips.bands])
@@ -119,8 +111,7 @@ def get_crop_from_large_file(image_path, box_coords):
 # --- PIPELINE D'IA MULTIMODAL (Fusion OCR + Analyse) ---
 @st.cache_data(show_spinner=False)
 def get_kyc_analysis_from_image(_llm_client, image_bytes):
-    """Fait un UNIQUE appel à l'IA multimodale pour l'OCR, l'authentification ET l'extraction."""
-    # ... (le code de cette fonction est bon, pas de changement)
+    # ... (inchangé, ce code est robuste)
     print("Appel à l'API Mistral Multimodale pour analyse complète...")
     kyc_prompt = """
     Tu es un auditeur expert en conformité et en analyse de documents forensiques pour le secteur bancaire de la zone CEMAC. 
@@ -163,18 +154,15 @@ def get_kyc_analysis_from_image(_llm_client, image_bytes):
     except Exception as e: st.error(f"Erreur lors de l'analyse par l'IA : {e}"); return None
 
 # --- COMPOSANTS D'INTERFACE PROFESSIONNELS ---
-# ... (les fonctions display_* sont bonnes, pas de changement)
-def display_verification_summary(auth_report):
-    # ... votre code
+# ... (inchangé, ce code est robuste)
+def display_verification_summary(auth_report): # ...votre code...
     pass
-def display_authentication_details(auth_report):
-    # ... votre code
+def display_authentication_details(auth_report): # ...votre code...
     pass
-def display_identity_card(data):
-    # ... votre code
+def display_identity_card(data): # ...votre code...
     pass
 
-# --- APPLICATION PRINCIPALE ORCHESTRATRICE (AVEC LOGIQUE DE CONTRÔLE RENFORCÉE) ---
+# --- APPLICATION PRINCIPALE ORCHESTRATRICE (VERSION BLINDÉE) ---
 def main():
     st.set_page_config(page_title="Auto KYC | Secteur Bancaire", layout="wide", initial_sidebar_state="collapsed")
     st.title("🆔 Assistant de Vérification KYC")
@@ -189,54 +177,63 @@ def main():
     if uploaded_file is not None:
         if st.button("Lancer la Vérification ✨", type="primary", use_container_width=True):
             st.session_state.clear()
-            with st.spinner("Traitement sécurisé du document en cours..."):
-                # Utiliser un chemin de fichier temporaire pour une gestion propre
+            
+            tmp_path = None # Initialiser le chemin du fichier temporaire
+            try:
+                # Créer un fichier temporaire pour stocker l'image uploadée
                 with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp:
                     tmp.write(uploaded_file.getvalue()); tmp.flush(); tmp_path = tmp.name
                 
-                with st.status("Étape 1/3 : Localisation du document...", expanded=True) as status:
+                # --- PIPELINE DE TRAITEMENT SÉQUENTIEL ET CONTRÔLÉ ---
+                with st.spinner("Analyse du document en cours..."):
+
+                    # ÉTAPE 1: LOCALISATION
+                    status_loc = st.status("Étape 1 : Localisation du document...", expanded=True)
                     global_box, thumbnail_img = process_large_image_in_tiles(detection_model, tmp_path)
                     
-                    # === CORRECTION DÉFINITIVE ===
-                    # Vérification immédiate et robuste des retours de la fonction
+                    # === CONTRÔLE DE SÉCURITÉ N°1 ===
+                    # Est-ce que le traitement de l'image a échoué complètement ?
                     if thumbnail_img is None:
-                        # Si la fonction a planté au point de ne même pas pouvoir renvoyer une miniature,
-                        # c'est une erreur critique. On s'arrête ici.
-                        status.update(label="Erreur Critique de Traitement.", state="error", expanded=False)
+                        status_loc.update(label="Erreur Critique de Traitement", state="error", expanded=False)
                         st.error("Impossible de traiter l'image. Le fichier est peut-être sévèrement corrompu.")
-                        os.remove(tmp_path) # Nettoyage
-                        st.stop()
+                        st.stop() # Arrêt immédiat et propre
                     
-                    st.session_state.processed_img = thumbnail_img # On peut maintenant le stocker sans risque
-
+                    st.session_state.processed_img = thumbnail_img # Stockage sûr
+                    
+                    # === CONTRÔLE DE SÉCURITÉ N°2 ===
+                    # La CNI a-t-elle été trouvée ?
                     if global_box is None:
-                        status.update(label="Localisation échouée.", state="error", expanded=False)
+                        status_loc.update(label="Localisation échouée", state="warning", expanded=False)
                         st.warning("Aucun document d'identité n'a pu être localisé sur l'image.")
-                        os.remove(tmp_path) # Nettoyage
-                        st.stop() # On s'arrête, mais on affichera l'image plus tard
+                        # On ne s'arrête pas, on affichera l'image non-annotée plus tard
+                    else:
+                        status_loc.update(label="Document localisé avec succès", state="complete", expanded=False)
+                        
+                        # ÉTAPE 2: ANALYSE IA (uniquement si la CNI est trouvée)
+                        status_ia = st.status("Étape 2 : Analyse par l'Intelligence Artificielle...", expanded=True)
+                        cni_crop_pil = get_crop_from_large_file(tmp_path, global_box)
+                        with io.BytesIO() as buf: cni_crop_pil.save(buf, format='JPEG', quality=95); image_bytes = buf.getvalue()
+                        
+                        final_report = get_kyc_analysis_from_image(llm_client, image_bytes)
+                        st.session_state.final_report = final_report
+                        
+                        if final_report is None:
+                            status_ia.update(label="Analyse IA échouée", state="error", expanded=False)
+                            st.error("L'analyse par l'IA a échoué. Veuillez réessayer.")
+                        else:
+                            status_ia.update(label="Analyse IA terminée", state="complete", expanded=False)
 
-                    status.update(label="Document localisé.", state="complete", expanded=False)
-
-                with st.status("Étape 2/3 : Analyse par l'Intelligence Artificielle...", expanded=True) as status:
-                    cni_crop_pil = get_crop_from_large_file(tmp_path, global_box)
-                    with io.BytesIO() as buf: cni_crop_pil.save(buf, format='JPEG', quality=95); image_bytes = buf.getvalue()
-                    final_report = get_kyc_analysis_from_image(llm_client, image_bytes)
-                    st.session_state.final_report = final_report
-                    if final_report is None:
-                        status.update(label="Analyse IA échouée.", state="error", expanded=False)
-                        st.error("L'analyse par l'IA a échoué.");
-                        os.remove(tmp_path) # Nettoyage
-                        st.stop()
-                    status.update(label="Analyse IA terminée.", state="complete", expanded=False)
-                
-                os.remove(tmp_path) # Nettoyage final réussi
+            finally:
+                # === NETTOYAGE GARANTI ===
+                # Ce bloc s'exécute TOUJOURS, que le "try" réussisse ou échoue.
+                if tmp_path and os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+                    print(f"Fichier temporaire {tmp_path} supprimé.")
 
     # --- Section d'affichage des résultats ---
-    # Cette section est maintenant protégée contre les erreurs car on s'arrête avant si les données sont invalides
-
-    if 'processed_img' in st.session_state and st.session_state.processed_img is not None:
+    if 'processed_img' in st.session_state:
+        # Afficher le rapport complet si l'analyse IA a réussi
         if 'final_report' in st.session_state and st.session_state.final_report:
-            # Cas nominal : tout a réussi
             st.divider(); st.header("Rapport de Vérification KYC", anchor=False)
             report = st.session_state.final_report
             col_summary, col_preview = st.columns([2, 1])
@@ -247,13 +244,13 @@ def main():
                 pil_to_display = Image.fromarray(cv2.cvtColor(st.session_state.processed_img, cv2.COLOR_BGR2RGB))
                 st.image(pil_to_display, caption="Aperçu du document analysé", use_container_width=True)
             st.divider(); display_identity_card(report.get("fiche_identite", {}))
-        else:
-            # Cas où la CNI n'a pas été trouvée, mais on a une miniature à afficher
+        
+        # Afficher seulement l'image si la localisation a échoué mais que l'image est lisible
+        elif 'final_report' not in st.session_state:
             st.divider()
             st.subheader("Résultat de la Localisation", anchor=False)
             pil_to_display = Image.fromarray(cv2.cvtColor(st.session_state.processed_img, cv2.COLOR_BGR2RGB))
             st.image(pil_to_display, caption="Aperçu du document analysé", use_container_width=True)
-
 
 if __name__ == "__main__":
     # Collez ici vos fonctions d'affichage complètes
