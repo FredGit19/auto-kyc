@@ -23,7 +23,7 @@ from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 from torchvision.transforms import v2 as T
 
 # --- CONFIGURATION STRATÉGIQUE ---
-MODEL_PATH = "frcnn_cni_best_safe.pth"
+MODEL_PATH = "frcnn_cni_best.pth"
 DEVICE = torch.device("cpu")
 CONFIDENCE_THRESHOLD = 0.8
 TILE_SIZE = 1280
@@ -93,8 +93,8 @@ def process_large_image_in_tiles(model, image_path):
                 tile_width, tile_height = min(TILE_SIZE, width - x), min(TILE_SIZE, height - y)
                 if tile_width <= 0 or tile_height <= 0: continue
                 tile_vips = vips_image.crop(x, y, tile_width, tile_height)
-                tile_np = np.ndarray(buffer=tile_vips.write_to_memory(), dtype=np.uint8, shape=[tile_height, tile_width, tile_vips.bands])
-                tile_pil = Image.fromarray(tile_np)
+                tile_np_crop = np.ndarray(buffer=tile_vips.write_to_memory(), dtype=np.uint8, shape=[tile_height, tile_width, tile_vips.bands])
+                tile_pil = Image.fromarray(tile_np_crop)
                 box = detect_on_tile(model, tile_pil)
                 if box is not None:
                     global_box = (x + box[0], y + box[1], x + box[2], y + box[3])
@@ -105,7 +105,9 @@ def process_large_image_in_tiles(model, image_path):
                                   (0, 255, 0), 3)
                     return global_box, thumbnail_np
         return None, thumbnail_np
-    except pyvips.error.VipsError as e: st.error(f"Erreur PyVips: {e}. La bibliothèque système libvips est-elle bien installée ?"); return None, None
+    except pyvips.error.VipsError as e:
+        st.error(f"Erreur de traitement d'image (PyVips): Le fichier est peut-être corrompu ou d'un format non supporté. Détails: {e}")
+        return None, None
     
 def get_crop_from_large_file(image_path, box_coords):
     """Extrait la zone de la CNI depuis le fichier volumineux sur disque."""
@@ -118,6 +120,7 @@ def get_crop_from_large_file(image_path, box_coords):
 @st.cache_data(show_spinner=False)
 def get_kyc_analysis_from_image(_llm_client, image_bytes):
     """Fait un UNIQUE appel à l'IA multimodale pour l'OCR, l'authentification ET l'extraction."""
+    # ... (le code de cette fonction est bon, pas de changement)
     print("Appel à l'API Mistral Multimodale pour analyse complète...")
     kyc_prompt = """
     Tu es un auditeur expert en conformité et en analyse de documents forensiques pour le secteur bancaire de la zone CEMAC. 
@@ -160,54 +163,18 @@ def get_kyc_analysis_from_image(_llm_client, image_bytes):
     except Exception as e: st.error(f"Erreur lors de l'analyse par l'IA : {e}"); return None
 
 # --- COMPOSANTS D'INTERFACE PROFESSIONNELS ---
+# ... (les fonctions display_* sont bonnes, pas de changement)
 def display_verification_summary(auth_report):
-    """Affiche le verdict et le score de confiance."""
-    st.subheader("Synthèse de la Vérification", anchor=False)
-    score = auth_report.get('score_de_confiance', 0)
-    reco = auth_report.get('recommandation', 'Erreur')
-    if reco == "Approbation Suggérée": st.success(f"**Recommandation :** {reco}", icon="✅")
-    elif reco == "Examen Manuel Approfondi Requis": st.warning(f"**Recommandation :** {reco}", icon="⚠️")
-    else: st.error(f"**Recommandation :** {reco}", icon="🚨")
-    st.progress(score, text=f"**Score de Confiance du Document : {score}%**")
-
+    # ... votre code
+    pass
 def display_authentication_details(auth_report):
-    """Affiche la checklist de l'analyse forensique."""
-    st.subheader("Analyse d'Authenticité", anchor=False)
-    with st.expander("Afficher les points de contrôle forensiques", expanded=False):
-        for point in auth_report.get('points_de_verification', []):
-            col1, col2, col3 = st.columns([2,1,3])
-            with col1: st.markdown(f"**{point['critere']}**")
-            with col2:
-                statut = point['statut']
-                if statut == "OK": st.markdown(f"✅ **{statut}**")
-                else: st.markdown(f"⚠️ **{statut}**")
-            with col3: st.caption(point['observation'])
-
+    # ... votre code
+    pass
 def display_identity_card(data):
-    """Affiche la fiche d'identité de manière claire et professionnelle."""
-    st.subheader("Fiche d'Identité", anchor=False)
-    with st.container(border=True):
-        col1, col2 = st.columns(2)
-        with col1:
-            st.text_input("Nom", value=data.get('nom', 'N/A'), disabled=True, key="nom")
-            st.text_input("Prénoms", value=data.get('prenoms', 'N/A'), disabled=True, key="prenoms")
-            st.text_input("Sexe", value=data.get('sexe', 'N/A'), disabled=True, key="sexe")
-        with col2:
-            st.text_input("Date de Naissance", value=data.get('date_naissance', 'N/A'), disabled=True, key="date_naissance")
-            st.text_input("Lieu de Naissance", value=data.get('lieu_naissance', 'N/A'), disabled=True, key="lieu_naissance")
-        st.text_input("Profession", value=data.get('profession', 'N/A'), disabled=True, key="profession")
-        st.divider()
-        col3, col4 = st.columns(2);
-        with col3: st.text_input("Père", value=data.get('pere', 'N/A'), disabled=True, key="pere")
-        with col4: st.text_input("Mère", value=data.get('mere', 'N/A'), disabled=True, key="mere")
-        st.divider()
-        st.text_input("Poste d'identification", value=data.get('poste_identification', 'N/A'), disabled=True, key="poste_identification")
-        col5, col6, col7 = st.columns(3)
-        with col5: st.text_input("Délivrance", value=data.get('date_delivrance', 'N/A'), disabled=True, key="date_delivrance")
-        with col6: st.text_input("Expiration", value=data.get('date_expiration', 'N/A'), disabled=True, key="date_expiration")
-        with col7: st.text_input("Identifiant Unique", value=data.get('identifiant_unique_cni', 'N/A'), disabled=True, key="identifiant_unique_cni")
+    # ... votre code
+    pass
 
-# --- APPLICATION PRINCIPALE ORCHESTRATRICE ---
+# --- APPLICATION PRINCIPALE ORCHESTRATRICE (AVEC LOGIQUE DE CONTRÔLE RENFORCÉE) ---
 def main():
     st.set_page_config(page_title="Auto KYC | Secteur Bancaire", layout="wide", initial_sidebar_state="collapsed")
     st.title("🆔 Assistant de Vérification KYC")
@@ -223,39 +190,115 @@ def main():
         if st.button("Lancer la Vérification ✨", type="primary", use_container_width=True):
             st.session_state.clear()
             with st.spinner("Traitement sécurisé du document en cours..."):
+                # Utiliser un chemin de fichier temporaire pour une gestion propre
                 with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp:
                     tmp.write(uploaded_file.getvalue()); tmp.flush(); tmp_path = tmp.name
                 
                 with st.status("Étape 1/3 : Localisation du document...", expanded=True) as status:
                     global_box, thumbnail_img = process_large_image_in_tiles(detection_model, tmp_path)
-                    st.session_state.processed_img = thumbnail_img
+                    
+                    # === CORRECTION DÉFINITIVE ===
+                    # Vérification immédiate et robuste des retours de la fonction
+                    if thumbnail_img is None:
+                        # Si la fonction a planté au point de ne même pas pouvoir renvoyer une miniature,
+                        # c'est une erreur critique. On s'arrête ici.
+                        status.update(label="Erreur Critique de Traitement.", state="error", expanded=False)
+                        st.error("Impossible de traiter l'image. Le fichier est peut-être sévèrement corrompu.")
+                        os.remove(tmp_path) # Nettoyage
+                        st.stop()
+                    
+                    st.session_state.processed_img = thumbnail_img # On peut maintenant le stocker sans risque
+
                     if global_box is None:
                         status.update(label="Localisation échouée.", state="error", expanded=False)
-                        st.error("Aucun document d'identité n'a pu être localisé sur l'image."); st.stop()
+                        st.warning("Aucun document d'identité n'a pu être localisé sur l'image.")
+                        os.remove(tmp_path) # Nettoyage
+                        st.stop() # On s'arrête, mais on affichera l'image plus tard
+
                     status.update(label="Document localisé.", state="complete", expanded=False)
 
-                with st.status("Étape 2/3 : Analyse par l'IA...", expanded=True) as status:
+                with st.status("Étape 2/3 : Analyse par l'Intelligence Artificielle...", expanded=True) as status:
                     cni_crop_pil = get_crop_from_large_file(tmp_path, global_box)
                     with io.BytesIO() as buf: cni_crop_pil.save(buf, format='JPEG', quality=95); image_bytes = buf.getvalue()
                     final_report = get_kyc_analysis_from_image(llm_client, image_bytes)
                     st.session_state.final_report = final_report
                     if final_report is None:
                         status.update(label="Analyse IA échouée.", state="error", expanded=False)
-                        st.error("L'analyse par l'IA a échoué."); st.stop()
+                        st.error("L'analyse par l'IA a échoué.");
+                        os.remove(tmp_path) # Nettoyage
+                        st.stop()
                     status.update(label="Analyse IA terminée.", state="complete", expanded=False)
-                os.remove(tmp_path) # Nettoyer le fichier temporaire
+                
+                os.remove(tmp_path) # Nettoyage final réussi
 
-    if 'final_report' in st.session_state and st.session_state.final_report:
-        st.divider(); st.header("Rapport de Vérification KYC", anchor=False)
-        report = st.session_state.final_report
-        col_summary, col_preview = st.columns([2, 1])
-        with col_summary:
-            display_verification_summary(report.get("rapport_authentification", {}))
-            display_authentication_details(report.get("rapport_authentification", {}))
-        with col_preview:
+    # --- Section d'affichage des résultats ---
+    # Cette section est maintenant protégée contre les erreurs car on s'arrête avant si les données sont invalides
+
+    if 'processed_img' in st.session_state and st.session_state.processed_img is not None:
+        if 'final_report' in st.session_state and st.session_state.final_report:
+            # Cas nominal : tout a réussi
+            st.divider(); st.header("Rapport de Vérification KYC", anchor=False)
+            report = st.session_state.final_report
+            col_summary, col_preview = st.columns([2, 1])
+            with col_summary:
+                display_verification_summary(report.get("rapport_authentification", {}))
+                display_authentication_details(report.get("rapport_authentification", {}))
+            with col_preview:
+                pil_to_display = Image.fromarray(cv2.cvtColor(st.session_state.processed_img, cv2.COLOR_BGR2RGB))
+                st.image(pil_to_display, caption="Aperçu du document analysé", use_container_width=True)
+            st.divider(); display_identity_card(report.get("fiche_identite", {}))
+        else:
+            # Cas où la CNI n'a pas été trouvée, mais on a une miniature à afficher
+            st.divider()
+            st.subheader("Résultat de la Localisation", anchor=False)
             pil_to_display = Image.fromarray(cv2.cvtColor(st.session_state.processed_img, cv2.COLOR_BGR2RGB))
             st.image(pil_to_display, caption="Aperçu du document analysé", use_container_width=True)
-        st.divider(); display_identity_card(report.get("fiche_identite", {}))
+
 
 if __name__ == "__main__":
+    # Collez ici vos fonctions d'affichage complètes
+    def display_verification_summary(auth_report):
+        st.subheader("Synthèse de la Vérification", anchor=False)
+        score = auth_report.get('score_de_confiance', 0)
+        reco = auth_report.get('recommandation', 'Erreur')
+        if reco == "Approbation Suggérée": st.success(f"**Recommandation :** {reco}", icon="✅")
+        elif reco == "Examen Manuel Approfondi Requis": st.warning(f"**Recommandation :** {reco}", icon="⚠️")
+        else: st.error(f"**Recommandation :** {reco}", icon="🚨")
+        st.progress(score, text=f"**Score de Confiance du Document : {score}%**")
+
+    def display_authentication_details(auth_report):
+        st.subheader("Analyse d'Authenticité", anchor=False)
+        with st.expander("Afficher les points de contrôle forensiques", expanded=False):
+            for point in auth_report.get('points_de_verification', []):
+                col1, col2, col3 = st.columns([2,1,3])
+                with col1: st.markdown(f"**{point['critere']}**")
+                with col2:
+                    statut = point['statut']
+                    if statut == "OK": st.markdown(f"✅ **{statut}**")
+                    else: st.markdown(f"⚠️ **{statut}**")
+                with col3: st.caption(point['observation'])
+
+    def display_identity_card(data):
+        st.subheader("Fiche d'Identité", anchor=False)
+        with st.container(border=True):
+            col1, col2 = st.columns(2)
+            with col1:
+                st.text_input("Nom", value=data.get('nom', 'N/A'), disabled=True, key="nom")
+                st.text_input("Prénoms", value=data.get('prenoms', 'N/A'), disabled=True, key="prenoms")
+                st.text_input("Sexe", value=data.get('sexe', 'N/A'), disabled=True, key="sexe")
+            with col2:
+                st.text_input("Date de Naissance", value=data.get('date_naissance', 'N/A'), disabled=True, key="date_naissance")
+                st.text_input("Lieu de Naissance", value=data.get('lieu_naissance', 'N/A'), disabled=True, key="lieu_naissance")
+            st.text_input("Profession", value=data.get('profession', 'N/A'), disabled=True, key="profession")
+            st.divider()
+            col3, col4 = st.columns(2);
+            with col3: st.text_input("Père", value=data.get('pere', 'N/A'), disabled=True, key="pere")
+            with col4: st.text_input("Mère", value=data.get('mere', 'N/A'), disabled=True, key="mere")
+            st.divider()
+            st.text_input("Poste d'identification", value=data.get('poste_identification', 'N/A'), disabled=True, key="poste_identification")
+            col5, col6, col7 = st.columns(3)
+            with col5: st.text_input("Délivrance", value=data.get('date_delivrance', 'N/A'), disabled=True, key="date_delivrance")
+            with col6: st.text_input("Expiration", value=data.get('date_expiration', 'N/A'), disabled=True, key="date_expiration")
+            with col7: st.text_input("Identifiant Unique", value=data.get('identifiant_unique_cni', 'N/A'), disabled=True, key="identifiant_unique_cni")
+
     main()
