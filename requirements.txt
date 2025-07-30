@@ -11,3 +11,4 @@ Pillow
 opencv-python-headless
 torch
 torchvision
+pyvips
