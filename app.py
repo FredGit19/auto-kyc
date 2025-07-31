@@ -23,7 +23,7 @@ from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 from torchvision.transforms import v2 as T
 
 # --- CONFIGURATION STRATÉGIQUE ---
-MODEL_PATH = "frcnn_cni_best_safe.pth"
+MODEL_PATH = "frcnn_cni_best.pth"
 DEVICE = torch.device("cpu")
 CONFIDENCE_THRESHOLD = 0.8
 TILE_SIZE = 1280
