@@ -1,301 +1,204 @@
-# ==========================================================================================
-# APPLICATION "AUTO KYC" - VERSION EXPERT POUR SECTEUR BANCAIRE
-# Architecture de contrôle renforcée pour une fiabilité maximale
-# ==========================================================================================
+# ==============================================================================
+# APPLICATION STREAMLIT - VERSION FINALE ET ROBUSTE
+# ==============================================================================
+# Corrections et améliorations clés :
+# - COHÉRENCE TOTALE : Utilise Albumentations pour le pré-traitement, comme dans 
+#   le script d'entraînement, afin d'éliminer toute désynchronisation.
+# - ROBUSTESSE : Gestion améliorée des erreurs de chargement et de détection.
+# - CLARTÉ : Code et commentaires améliorés pour une meilleure compréhension.
+# ==============================================================================
 
 import streamlit as st
 import torch
 import cv2
 import numpy as np
-import json
+import easyocr
 from PIL import Image
-import io
-import base64
-import os
-import tempfile
-import pyvips  # Essentiel pour la performance sur fichiers volumineux
-
-from mistralai import Mistral
-
-# --- Importations locales pour le modèle de détection ---
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
 from torchvision.models.detection import fasterrcnn_resnet50_fpn
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
-from torchvision.transforms import v2 as T
 
-# --- CONFIGURATION STRATÉGIQUE ---
-MODEL_PATH = "frcnn_cni_best_safe.pth"
-DEVICE = torch.device("cpu")
-CONFIDENCE_THRESHOLD = 0.8
-TILE_SIZE = 1280
-TILE_OVERLAP = 100
+# --- CONFIGURATION ET CHARGEMENT DES MODÈLES (Sécurisé par cache) ---
 
-# --- CHARGEMENT OPTIMISÉ DES RESSOURCES ---
+MODEL_PATH = "models/frcnn_cni_best.pth" # Assurez-vous que le chemin est correct
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+CONFIDENCE_THRESHOLD = 0.7 # Seuil de confiance
+
+def get_model_architecture(num_classes):
+    """
+    DÉFINITION IDENTIQUE À L'ENTRAÎNEMENT :
+    Construit l'architecture exacte du modèle pour pouvoir charger les poids.
+    """
+    model = fasterrcnn_resnet50_fpn(weights=None)
+    in_features = model.roi_heads.box_predictor.cls_score.in_features
+    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
+    return model
+
 @st.cache_resource
 def load_detection_model():
-    # ... (inchangé, ce code est robuste)
+    """Charge le modèle de détection Faster R-CNN entraîné."""
     try:
-        model = fasterrcnn_resnet50_fpn(weights=None)
-        in_features = model.roi_heads.box_predictor.cls_score.in_features
-        model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes=2)
+        # 1. Créer l'architecture vide
+        model = get_model_architecture(num_classes=2) # 1 classe (CNI) + 1 fond
+        
+        # 2. Charger le checkpoint (poids, etc.)
         checkpoint = torch.load(MODEL_PATH, map_location=DEVICE)
-        state_dict = checkpoint.get('model_state_dict', checkpoint)
-        model.load_state_dict(state_dict)
+        
+        # 3. Charger les poids dans l'architecture
+        model.load_state_dict(checkpoint['model_state_dict'])
+        
         model.to(DEVICE)
-        model.eval()
-        print("Modèle de détection chargé.")
+        model.eval() # Mettre le modèle en mode évaluation (très important !)
+        print("Modèle de détection chargé avec succès sur le device:", DEVICE)
         return model
+    except FileNotFoundError:
+        st.error(f"ERREUR CRITIQUE : Le fichier du modèle est introuvable au chemin '{MODEL_PATH}'.")
+        st.error("Vérifiez que le modèle 'frcnn_cni_best.pth' se trouve bien dans le dossier 'models/'.")
+        return None
     except Exception as e:
-        st.error(f"Erreur critique au chargement du modèle de détection : {e}")
+        st.error(f"Une erreur est survenue lors du chargement du modèle de détection : {e}")
         return None
 
 @st.cache_resource
-def load_llm_client():
-    # ... (inchangé, ce code est robuste)
+def load_ocr_model():
+    """Charge le modèle EasyOCR pour la reconnaissance de texte."""
     try:
-        client = Mistral(api_key=st.secrets["MISTRAL_API_KEY"])
-        print("Client Mistral AI initialisé.")
-        return client
+        reader = easyocr.Reader(['fr', 'en'], gpu=torch.cuda.is_available())
+        print("Modèle OCR chargé avec succès.")
+        return reader
     except Exception as e:
-        st.error(f"Erreur de configuration du client Mistral. Vérifiez .streamlit/secrets.toml. Détails : {e}")
+        st.error(f"Une erreur est survenue lors du chargement du modèle OCR : {e}")
         return None
 
-# --- PIPELINE DE TRAITEMENT D'IMAGE "OUT-OF-CORE" ---
-def detect_on_tile(model, tile_pil):
-    # ... (inchangé, ce code est robuste)
-    image_tensor = T.Compose([T.ToImage(), T.ToDtype(torch.float32, scale=True)])(tile_pil).to(DEVICE)
+# --- FONCTIONS DE TRAITEMENT AVEC LA CORRECTION DÉFINITIVE ---
+
+def get_inference_transforms():
+    """
+    LA CORRECTION CLÉ : Utilise le même pipeline de validation que l'entraînement.
+    """
+    return A.Compose([
+        A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]), # Normalisation ImageNet
+        ToTensorV2(), # Convertit en Tensor PyTorch
+    ])
+
+def detect_cni(model, pil_image):
+    """
+    Effectue la détection sur une image en utilisant le pipeline de transformation correct.
+    """
+    if model is None: return None, None
+        
+    # 1. Convertir l'image PIL en tableau NumPy, format attendu par Albumentations
+    image_np = np.array(pil_image.convert('RGB'))
+    
+    # 2. Appliquer les transformations
+    transforms = get_inference_transforms()
+    transformed = transforms(image=image_np)
+    image_tensor = transformed['image'].to(DEVICE)
+    
+    # 3. Le modèle attend un "batch" d'images, même s'il n'y en a qu'une
+    image_tensor = image_tensor.unsqueeze(0) 
+    
     with torch.no_grad():
-        prediction = model([image_tensor])
+        prediction = model(image_tensor)
+        
+    # 4. Extraire et filtrer les résultats
     boxes = prediction[0]['boxes'].cpu().numpy()
     scores = prediction[0]['scores'].cpu().numpy()
-    best_box = None; max_score = 0
+    
+    best_box = None
+    max_score = 0
+    # On prend la boîte avec le plus haut score au-dessus du seuil
     for box, score in zip(boxes, scores):
         if score > CONFIDENCE_THRESHOLD and score > max_score:
             max_score = score
             best_box = box
-    return best_box
 
-def process_large_image_in_tiles(model, image_path):
-    # ... (inchangé, ce code est robuste)
-    try:
-        vips_image = pyvips.Image.new_from_file(image_path, access='sequential')
-        width, height = vips_image.width, vips_image.height
-        thumbnail_vips = vips_image.thumbnail_image(800)
-        thumbnail_np = np.ndarray(buffer=thumbnail_vips.write_to_memory(),dtype=np.uint8, shape=[thumbnail_vips.height, thumbnail_vips.width, thumbnail_vips.bands])
-        if thumbnail_np.shape[2] == 4: thumbnail_np = cv2.cvtColor(thumbnail_np, cv2.COLOR_RGBA2BGR)
-        else: thumbnail_np = cv2.cvtColor(thumbnail_np, cv2.COLOR_RGB2BGR)
-        for y in range(0, height, TILE_SIZE - TILE_OVERLAP):
-            for x in range(0, width, TILE_SIZE - TILE_OVERLAP):
-                tile_width, tile_height = min(TILE_SIZE, width - x), min(TILE_SIZE, height - y)
-                if tile_width <= 0 or tile_height <= 0: continue
-                tile_vips = vips_image.crop(x, y, tile_width, tile_height)
-                tile_np_crop = np.ndarray(buffer=tile_vips.write_to_memory(), dtype=np.uint8, shape=[tile_height, tile_width, tile_vips.bands])
-                tile_pil = Image.fromarray(tile_np_crop)
-                box = detect_on_tile(model, tile_pil)
-                if box is not None:
-                    global_box = (x + box[0], y + box[1], x + box[2], y + box[3])
-                    scale_x, scale_y = thumbnail_np.shape[1] / width, thumbnail_np.shape[0] / height
-                    cv2.rectangle(thumbnail_np, (int(global_box[0] * scale_x), int(global_box[1] * scale_y)), (int(global_box[2] * scale_x), int(global_box[3] * scale_y)), (0, 255, 0), 3)
-                    return global_box, thumbnail_np
-        return None, thumbnail_np
-    except pyvips.error.VipsError as e:
-        st.error(f"Erreur de traitement d'image (PyVips): Le fichier est peut-être corrompu ou d'un format non supporté. Détails: {e}")
-        return None, None
+    # Dessiner le résultat sur l'image originale (au format OpenCV)
+    image_cv = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+    if best_box is not None:
+        x1, y1, x2, y2 = map(int, best_box)
+        cv2.rectangle(image_cv, (x1, y1), (x2, y2), (36, 255, 12), 2) # Couleur verte vive
+        label = f"CNI: {max_score:.2f}"
+        cv2.putText(image_cv, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (36, 255, 12), 2)
     
-def get_crop_from_large_file(image_path, box_coords):
-    # ... (inchangé, ce code est robuste)
-    x1, y1, x2, y2 = map(int, box_coords)
-    crop_vips = pyvips.Image.new_from_file(image_path).crop(x1, y1, x2 - x1, y2 - y1)
-    crop_np = np.ndarray(buffer=crop_vips.write_to_memory(), dtype=np.uint8, shape=[crop_vips.height, crop_vips.width, crop_vips.bands])
-    return Image.fromarray(crop_np)
+    return image_cv, best_box
 
-# --- PIPELINE D'IA MULTIMODAL (Fusion OCR + Analyse) ---
-@st.cache_data(show_spinner=False)
-def get_kyc_analysis_from_image(_llm_client, image_bytes):
-    # ... (inchangé, ce code est robuste)
-    print("Appel à l'API Mistral Multimodale pour analyse complète...")
-    kyc_prompt = """
-    Tu es un auditeur expert en conformité et en analyse de documents forensiques pour le secteur bancaire de la zone CEMAC. 
-    Ta mission est d'analyser l'image d'une Carte Nationale d'Identité (CNI) camerounaise pour un processus KYC critique.
-    Ton analyse doit suivre un raisonnement en trois étapes, mais tu ne dois fournir que l'objet JSON final.
-    1.  **Phase d'Authentification (Analyse Forensique)** :
-        - Vérifie la présence et la clarté des éléments de sécurité textuels : 'REPUBLIQUE DU CAMEROUN', 'NATIONAL IDENTITY CARD'.
-        - Analyse la cohérence des polices de caractères. Y a-t-il des fontes mixtes ou d'apparences suspectes ?
-        - Évalue l'alignement des champs de texte. Sont-ils droits et professionnels ?
-        - Valide la logique des dates (délivrance < expiration).
-        - Confirme la présence d'une signature.
-        - À partir de ces points, établis un 'score_de_confiance' (0-100) et une 'recommandation' claire : "Approbation Suggérée", "Examen Manuel Approfondi Requis", ou "Rejet Fortement Suggéré".
-    2.  **Phase d'Extraction (Lecture de Données)** : Lis avec une précision absolue tous les champs de la carte.
-    3.  **Phase de Rapport (Formatage JSON)** : Structure TOUTE ton analyse dans un unique objet JSON. N'ajoute aucun texte avant ou après.
-    Voici la structure JSON exacte que tu dois produire :
-    {
-      "rapport_authentification": {
-        "score_de_confiance": "<int>", "recommandation": "<string>",
-        "points_de_verification": [
-          {"critere": "Présence En-tête 'REPUBLIQUE DU CAMEROUN'", "statut": "OK" | "Anomalie" | "Non Visible", "observation": "<string>"},
-          {"critere": "Cohérence des Polices de Caractères", "statut": "OK" | "Anomalie", "observation": "<string>"},
-          {"critere": "Alignement des Champs", "statut": "OK" | "Anomalie", "observation": "<string>"},
-          {"critere": "Logique des Dates (Délivrance/Expiration)", "statut": "OK" | "Anomalie" | "N/A", "observation": "<string>"},
-          {"critere": "Présence de la Signature", "statut": "OK" | "Anomalie" | "Non Visible", "observation": "<string>"}
-        ]
-      },
-      "fiche_identite": {
-        "nom": "<string>", "prenoms": "<string>", "date_naissance": "<string>", "lieu_naissance": "<string>", "sexe": "<string>", 
-        "profession": "<string>", "pere": "<string>", "mere": "<string>", "adresse": "<string>", "date_delivrance": "<string>", 
-        "date_expiration": "<string>", "identifiant_unique_cni": "<string>", "poste_identification": "<string>"
-      }
-    }
-    Si une information est illisible ou absente, utilise la valeur "Non trouvé".
+def parse_ocr_results(ocr_results):
     """
-    base64_image = base64.b64encode(image_bytes).decode('utf-8')
-    try:
-        messages = [{"role": "user", "content": [{"type": "text", "text": kyc_prompt}, {"type": "image_url", "image_url": f"data:image/jpeg;base64,{base64_image}"}]}]
-        chat_response = _llm_client.chat.complete(model="mistral-large-latest", messages=messages, response_format={"type": "json_object"})
-        return json.loads(chat_response.choices[0].message.content)
-    except Exception as e: st.error(f"Erreur lors de l'analyse par l'IA : {e}"); return None
-
-# --- COMPOSANTS D'INTERFACE PROFESSIONNELS ---
-# ... (inchangé, ce code est robuste)
-def display_verification_summary(auth_report): # ...votre code...
-    pass
-def display_authentication_details(auth_report): # ...votre code...
-    pass
-def display_identity_card(data): # ...votre code...
-    pass
-
-# --- APPLICATION PRINCIPALE ORCHESTRATRICE (VERSION BLINDÉE) ---
-def main():
-    st.set_page_config(page_title="Auto KYC | Secteur Bancaire", layout="wide", initial_sidebar_state="collapsed")
-    st.title("🆔 Assistant de Vérification KYC")
-    st.markdown("Outil d'aide à la décision pour l'analyse et la vérification des Cartes Nationales d'Identité.")
+    Tente de parser les résultats bruts d'EasyOCR. C'est une heuristique.
+    """
+    # ... (le code de parsing reste le même, il est à adapter selon les résultats)
+    extracted_data = {"NOM": "Non trouvé", "PRENOMS": "Non trouvé", "DATE_NAISSANCE": "Non trouvé"}
+    full_text = " ".join([res[1] for res in ocr_results])
     
-    detection_model, llm_client = load_detection_model(), load_llm_client()
-    if not (detection_model and llm_client): st.stop()
-        
-    st.divider()
-    uploaded_file = st.file_uploader("Chargez une image de haute qualité d'une CNI (recto ou verso)", type=["jpg", "jpeg", "png", "tif", "tiff"])
-
-    if uploaded_file is not None:
-        if st.button("Lancer la Vérification ✨", type="primary", use_container_width=True):
-            st.session_state.clear()
+    for i, res in enumerate(ocr_results):
+        text = res[1].upper()
+        if "NOM" in text and i + 1 < len(ocr_results):
+            extracted_data["NOM"] = ocr_results[i+1][1]
+        if "PRENOMS" in text and i + 1 < len(ocr_results):
+            extracted_data["PRENOMS"] = ocr_results[i+1][1]
+        if "NEE LE" in text or "NE LE" in text and i + 1 < len(ocr_results):
+            extracted_data["DATE_NAISSANCE"] = ocr_results[i+1][1]
             
-            tmp_path = None # Initialiser le chemin du fichier temporaire
-            try:
-                # Créer un fichier temporaire pour stocker l'image uploadée
-                with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp:
-                    tmp.write(uploaded_file.getvalue()); tmp.flush(); tmp_path = tmp.name
-                
-                # --- PIPELINE DE TRAITEMENT SÉQUENTIEL ET CONTRÔLÉ ---
-                with st.spinner("Analyse du document en cours..."):
+    return extracted_data, full_text
 
-                    # ÉTAPE 1: LOCALISATION
-                    status_loc = st.status("Étape 1 : Localisation du document...", expanded=True)
-                    global_box, thumbnail_img = process_large_image_in_tiles(detection_model, tmp_path)
-                    
-                    # === CONTRÔLE DE SÉCURITÉ N°1 ===
-                    # Est-ce que le traitement de l'image a échoué complètement ?
-                    if thumbnail_img is None:
-                        status_loc.update(label="Erreur Critique de Traitement", state="error", expanded=False)
-                        st.error("Impossible de traiter l'image. Le fichier est peut-être sévèrement corrompu.")
-                        st.stop() # Arrêt immédiat et propre
-                    
-                    st.session_state.processed_img = thumbnail_img # Stockage sûr
-                    
-                    # === CONTRÔLE DE SÉCURITÉ N°2 ===
-                    # La CNI a-t-elle été trouvée ?
-                    if global_box is None:
-                        status_loc.update(label="Localisation échouée", state="warning", expanded=False)
-                        st.warning("Aucun document d'identité n'a pu être localisé sur l'image.")
-                        # On ne s'arrête pas, on affichera l'image non-annotée plus tard
-                    else:
-                        status_loc.update(label="Document localisé avec succès", state="complete", expanded=False)
-                        
-                        # ÉTAPE 2: ANALYSE IA (uniquement si la CNI est trouvée)
-                        status_ia = st.status("Étape 2 : Analyse par l'Intelligence Artificielle...", expanded=True)
-                        cni_crop_pil = get_crop_from_large_file(tmp_path, global_box)
-                        with io.BytesIO() as buf: cni_crop_pil.save(buf, format='JPEG', quality=95); image_bytes = buf.getvalue()
-                        
-                        final_report = get_kyc_analysis_from_image(llm_client, image_bytes)
-                        st.session_state.final_report = final_report
-                        
-                        if final_report is None:
-                            status_ia.update(label="Analyse IA échouée", state="error", expanded=False)
-                            st.error("L'analyse par l'IA a échoué. Veuillez réessayer.")
-                        else:
-                            status_ia.update(label="Analyse IA terminée", state="complete", expanded=False)
+# --- INTERFACE UTILISATEUR STREAMLIT ---
 
-            finally:
-                # === NETTOYAGE GARANTI ===
-                # Ce bloc s'exécute TOUJOURS, que le "try" réussisse ou échoue.
-                if tmp_path and os.path.exists(tmp_path):
-                    os.remove(tmp_path)
-                    print(f"Fichier temporaire {tmp_path} supprimé.")
+def main():
+    st.set_page_config(page_title="Analyseur de CNI", layout="wide", initial_sidebar_state="auto")
+    st.title("🤖 Analyseur de Carte Nationale d'Identité")
+    st.markdown("---")
 
-    # --- Section d'affichage des résultats ---
-    if 'processed_img' in st.session_state:
-        # Afficher le rapport complet si l'analyse IA a réussi
-        if 'final_report' in st.session_state and st.session_state.final_report:
-            st.divider(); st.header("Rapport de Vérification KYC", anchor=False)
-            report = st.session_state.final_report
-            col_summary, col_preview = st.columns([2, 1])
-            with col_summary:
-                display_verification_summary(report.get("rapport_authentification", {}))
-                display_authentication_details(report.get("rapport_authentification", {}))
-            with col_preview:
-                pil_to_display = Image.fromarray(cv2.cvtColor(st.session_state.processed_img, cv2.COLOR_BGR2RGB))
-                st.image(pil_to_display, caption="Aperçu du document analysé", use_container_width=True)
-            st.divider(); display_identity_card(report.get("fiche_identite", {}))
+    st.sidebar.header("Instructions")
+    st.sidebar.info(
+        "1. Chargez une image claire et bien cadrée de la CNI.\n\n"
+        "2. Cliquez sur le bouton 'Lancer l'analyse'.\n\n"
+        "3. L'application va d'abord localiser la carte (boîte verte), puis lire les informations qu'elle contient."
+    )
+
+    uploaded_file = st.file_uploader(
+        "Déposez une image ici ou cliquez pour parcourir vos fichiers", 
+        type=["jpg", "jpeg", "png"]
+    )
+
+    if uploaded_file:
+        col1, col2 = st.columns(2)
+        pil_image = Image.open(uploaded_file)
         
-        # Afficher seulement l'image si la localisation a échoué mais que l'image est lisible
-        elif 'final_report' not in st.session_state:
-            st.divider()
-            st.subheader("Résultat de la Localisation", anchor=False)
-            pil_to_display = Image.fromarray(cv2.cvtColor(st.session_state.processed_img, cv2.COLOR_BGR2RGB))
-            st.image(pil_to_display, caption="Aperçu du document analysé", use_container_width=True)
+        with col1:
+            st.subheader("Image Originale")
+            st.image(pil_image, use_column_width=True)
+
+        if st.button("🚀 Lancer l'analyse", use_container_width=True, type="primary"):
+            detection_model = load_detection_model()
+            ocr_model = load_ocr_model()
+
+            if detection_model and ocr_model:
+                with col2:
+                    st.subheader("Résultats de l'Analyse")
+                    with st.spinner("Étape 1/2 : Détection de la carte en cours..."):
+                        detected_image, box = detect_cni(detection_model, pil_image)
+                    
+                    if box is None:
+                        st.warning("Aucune CNI n'a pu être détectée avec certitude. Essayez une image plus nette ou mieux cadrée.")
+                        st.image(detected_image, channels="BGR", use_column_width=True, caption="Tentative de détection.")
+                    else:
+                        st.success("✅ CNI localisée !")
+                        st.image(detected_image, channels="BGR", use_column_width=True, caption="CNI détectée sur l'image.")
+                        
+                        with st.spinner("Étape 2/2 : Lecture des informations (OCR)..."):
+                            x1, y1, x2, y2 = map(int, box)
+                            cni_crop = pil_image.crop((x1, y1, x2, y2))
+                            ocr_results = ocr_model.readtext(np.array(cni_crop))
+                            structured_data, raw_text = parse_ocr_results(ocr_results)
+                        
+                        st.success("✅ Lecture terminée !")
+                        st.write("#### Informations Extraites")
+                        st.json(structured_data)
+                        
+                        with st.expander("Afficher le texte brut extrait"):
+                            st.text_area("", raw_text, height=150)
 
 if __name__ == "__main__":
-    # Collez ici vos fonctions d'affichage complètes
-    def display_verification_summary(auth_report):
-        st.subheader("Synthèse de la Vérification", anchor=False)
-        score = auth_report.get('score_de_confiance', 0)
-        reco = auth_report.get('recommandation', 'Erreur')
-        if reco == "Approbation Suggérée": st.success(f"**Recommandation :** {reco}", icon="✅")
-        elif reco == "Examen Manuel Approfondi Requis": st.warning(f"**Recommandation :** {reco}", icon="⚠️")
-        else: st.error(f"**Recommandation :** {reco}", icon="🚨")
-        st.progress(score, text=f"**Score de Confiance du Document : {score}%**")
-
-    def display_authentication_details(auth_report):
-        st.subheader("Analyse d'Authenticité", anchor=False)
-        with st.expander("Afficher les points de contrôle forensiques", expanded=False):
-            for point in auth_report.get('points_de_verification', []):
-                col1, col2, col3 = st.columns([2,1,3])
-                with col1: st.markdown(f"**{point['critere']}**")
-                with col2:
-                    statut = point['statut']
-                    if statut == "OK": st.markdown(f"✅ **{statut}**")
-                    else: st.markdown(f"⚠️ **{statut}**")
-                with col3: st.caption(point['observation'])
-
-    def display_identity_card(data):
-        st.subheader("Fiche d'Identité", anchor=False)
-        with st.container(border=True):
-            col1, col2 = st.columns(2)
-            with col1:
-                st.text_input("Nom", value=data.get('nom', 'N/A'), disabled=True, key="nom")
-                st.text_input("Prénoms", value=data.get('prenoms', 'N/A'), disabled=True, key="prenoms")
-                st.text_input("Sexe", value=data.get('sexe', 'N/A'), disabled=True, key="sexe")
-            with col2:
-                st.text_input("Date de Naissance", value=data.get('date_naissance', 'N/A'), disabled=True, key="date_naissance")
-                st.text_input("Lieu de Naissance", value=data.get('lieu_naissance', 'N/A'), disabled=True, key="lieu_naissance")
-            st.text_input("Profession", value=data.get('profession', 'N/A'), disabled=True, key="profession")
-            st.divider()
-            col3, col4 = st.columns(2);
-            with col3: st.text_input("Père", value=data.get('pere', 'N/A'), disabled=True, key="pere")
-            with col4: st.text_input("Mère", value=data.get('mere', 'N/A'), disabled=True, key="mere")
-            st.divider()
-            st.text_input("Poste d'identification", value=data.get('poste_identification', 'N/A'), disabled=True, key="poste_identification")
-            col5, col6, col7 = st.columns(3)
-            with col5: st.text_input("Délivrance", value=data.get('date_delivrance', 'N/A'), disabled=True, key="date_delivrance")
-            with col6: st.text_input("Expiration", value=data.get('date_expiration', 'N/A'), disabled=True, key="date_expiration")
-            with col7: st.text_input("Identifiant Unique", value=data.get('identifiant_unique_cni', 'N/A'), disabled=True, key="identifiant_unique_cni")
-
     main()
