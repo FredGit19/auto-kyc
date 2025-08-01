@@ -1,11 +1,12 @@
 # ==========================================================================================
-# APPLICATION "AUTO KYC" - v4.1 - VERSION "PRODUCTION READY"
+# APPLICATION "AUTO KYC" - v4.2 - VERSION "PRODUCTION STABLE"
 # ==========================================================================================
-# NOUVELLE FONCTIONNALITÉ CLÉ :
-# - VALIDATION DE LA TAILLE DES FICHIERS : Un garde-fou a été ajouté pour rejeter
-#   les fichiers dépassant une taille raisonnable (25 Mo). Cela empêche les crashs
-#   mémoire, les timeouts et garantit une expérience utilisateur réactive.
-#   C'est une pratique de production non négociable.
+# CORRECTIF CLÉ (v4.2) :
+# - ROBUSTESSE DE L'AFFICHAGE : Correction d'une `ValueError` qui se produisait
+#   lorsque `st.image()` recevait une image vide ou invalide.
+# - La vérification `if variable:` a été remplacée par `if variable is not None and variable.size > 0`,
+#   ce qui garantit que l'image est à la fois existante et non vide avant de tenter de l'afficher.
+#   Cela prévient les crashs et améliore la stabilité de l'interface utilisateur.
 # ==========================================================================================
 
 import streamlit as st
@@ -30,11 +31,10 @@ except ImportError:
 
 # --- CONFIGURATION GLOBALE ---
 MODEL_PATH = "frcnn_cni_best_safe.pth"
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DEVICE = torch.device("cpu") # Forcé sur CPU pour une meilleure compatibilité de déploiement
 CONFIDENCE_THRESHOLD = 0.8
 MAX_IMAGE_DIMENSION = 1280
-# <<< LA NOUVELLE BARRIÈRE DE SÉCURITÉ >>>
-MAX_FILE_SIZE_MB = 25  # Limite généreuse mais sécuritaire
+MAX_FILE_SIZE_MB = 25
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 
 # --- INITIALISATION DES RESSOURCES (Mise en cache) ---
@@ -47,6 +47,7 @@ def load_detection_model():
     try:
         model = fasterrcnn_resnet50_fpn(weights=None)
         model.roi_heads.box_predictor = FastRCNNPredictor(model.roi_heads.box_predictor.cls_score.in_features, 2)
+        # Forcer le chargement sur le CPU
         model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
         model.to(DEVICE).eval()
         return model
@@ -84,12 +85,16 @@ def detect_cni(model, pil_image):
     with torch.no_grad():
         prediction = model([image_tensor])
     boxes, scores = prediction[0]['boxes'].cpu().numpy(), prediction[0]['scores'].cpu().numpy()
-    if len(scores) == 0: return cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR), None
+    
+    # Convertir l'image pour l'affichage, quoi qu'il arrive
+    image_cv = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+
+    if len(scores) == 0: return image_cv, None
     best_idx = np.argmax(scores)
     best_score = scores[best_idx]
-    if best_score < CONFIDENCE_THRESHOLD: return cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR), None
+    if best_score < CONFIDENCE_THRESHOLD: return image_cv, None
+    
     best_box = boxes[best_idx]
-    image_cv = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
     x1, y1, x2, y2 = map(int, best_box)
     cv2.rectangle(image_cv, (x1, y1), (x2, y2), (34, 139, 34), 3)
     return image_cv, best_box
@@ -131,15 +136,28 @@ def get_kyc_verdict_and_data(_llm_client, recto_text, verso_text):
         return None
 
 def process_single_side(side_name, uploaded_file, detection_model):
+    """Fonction de traitement rendue plus robuste pour éviter de retourner des données invalides."""
     pil_image = preprocess_uploaded_file(uploaded_file)
-    if not pil_image: return None, None
+    if not pil_image:
+        st.warning(f"Le fichier {side_name} est invalide ou corrompu et n'a pas pu être lu.")
+        return None, None
+    
     annotated_img, box = detect_cni(detection_model, pil_image)
-    if box is None: return annotated_img, None
+    
+    if annotated_img is None or annotated_img.size == 0:
+        st.warning(f"La détection a échoué pour le {side_name}, l'image retournée est invalide.")
+        return None, None
+    
+    if box is None:
+        return annotated_img, None
+        
     try:
         crop_box = tuple(map(int, box))
         crop_img = pil_image.crop(crop_box)
         return annotated_img, crop_img
-    except Exception: return annotated_img, None
+    except Exception as e:
+        st.warning(f"Erreur lors du rognage de l'image {side_name}: {e}")
+        return annotated_img, None
 
 # --- INTERFACE UTILISATEUR (UI) ---
 
@@ -169,14 +187,26 @@ def display_results_ui(report, recto_result, verso_result):
     
     st.markdown("##### Documents Analysés")
     res_col1, res_col2 = st.columns(2)
-    if recto_result: res_col1.image(recto_result, caption="Recto", channels="BGR")
-    if verso_result: res_col2.image(verso_result, caption="Verso", channels="BGR")
+    
+    # ==================== LA CORRECTION PRINCIPALE EST ICI ====================
+    # Vérification robuste pour éviter les ValueError sur les images vides ou invalides.
+    if recto_result is not None and recto_result.size > 0:
+        res_col1.image(recto_result, caption="Recto", channels="BGR")
+    else:
+        # Afficher un message si l'image n'a pas pu être traitée
+        res_col1.warning("Le document Recto n'a pas pu être traité ou affiché.", icon="🖼️")
+
+    if verso_result is not None and verso_result.size > 0:
+        res_col2.image(verso_result, caption="Verso", channels="BGR")
+    else:
+        res_col2.warning("Le document Verso n'a pas pu être traité ou affiché.", icon="🖼️")
+    # ======================================================================
 
 # --- APPLICATION PRINCIPALE ---
 
 def main():
     st.set_page_config(page_title="Auto KYC", layout="wide")
-    st.title("🆔 Outil de Vérification de CNI")
+    st.title("🆔 KYC Processing")
     st.markdown("Chargez les deux faces d'une carte d'identité pour lancer la vérification.")
     st.info(f"ℹ️  vos données sont sécurisées! rien n'est stocké!", icon="💡")
     st.divider()
@@ -197,11 +227,9 @@ def main():
                 st.warning("Veuillez charger les **deux** faces de la carte.")
                 st.stop()
 
-            # <<< BLOC DE VALIDATION DE TAILLE - LA GARANTIE DE STABILITÉ >>>
             if recto_file.size > MAX_FILE_SIZE_BYTES or verso_file.size > MAX_FILE_SIZE_BYTES:
-                st.error(f"Erreur : Un des fichiers dépasse la taille maximale autorisée de {MAX_FILE_SIZE_MB} Mo. Veuillez compresser ou redimensionner vos images avant de les téléverser.")
+                st.error(f"Erreur : Un des fichiers dépasse la taille maximale autorisée de {MAX_FILE_SIZE_MB} Mo.")
                 st.stop()
-            # <<< FIN DU BLOC DE VALIDATION >>>
 
             with st.spinner("Analyse en cours..."):
                 annotated_recto, crop_recto = process_single_side("Recto", recto_file, detection_model)
