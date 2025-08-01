@@ -1,11 +1,11 @@
 # ==========================================================================================
-# APPLICATION "AUTO KYC" - v4.0 - VERSION "VERDICT & EXTRACTION"
+# APPLICATION "AUTO KYC" - v4.1 - VERSION "PRODUCTION READY"
 # ==========================================================================================
-# Flux de Travail Simplifié pour l'Opérateur :
-# 1. Chargement des documents.
-# 2. L'IA effectue une analyse de conformité en arrière-plan.
-# 3. Affichage d'un verdict clair ("Conforme" / "Vérification Manuelle Requise").
-# 4. Affichage des données extraites si le document est jugé conforme.
+# NOUVELLE FONCTIONNALITÉ CLÉ :
+# - VALIDATION DE LA TAILLE DES FICHIERS : Un garde-fou a été ajouté pour rejeter
+#   les fichiers dépassant une taille raisonnable (25 Mo). Cela empêche les crashs
+#   mémoire, les timeouts et garantit une expérience utilisateur réactive.
+#   C'est une pratique de production non négociable.
 # ==========================================================================================
 
 import streamlit as st
@@ -33,8 +33,9 @@ MODEL_PATH = "frcnn_cni_best_safe.pth"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 CONFIDENCE_THRESHOLD = 0.8
 MAX_IMAGE_DIMENSION = 1280
-# Seuil de score de cohérence pour déclarer un document "Conforme"
-CONFORMITY_THRESHOLD_SCORE = 75
+# <<< LA NOUVELLE BARRIÈRE DE SÉCURITÉ >>>
+MAX_FILE_SIZE_MB = 25  # Limite généreuse mais sécuritaire
+MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 
 # --- INITIALISATION DES RESSOURCES (Mise en cache) ---
 
@@ -107,50 +108,29 @@ def get_text_from_image_via_ocr(_llm_client, image_bytes):
 
 @st.cache_data(show_spinner=False)
 def get_kyc_verdict_and_data(_llm_client, recto_text, verso_text):
-    """
-    PROMPT DE VALIDATION V4.0 :
-    Demande un verdict binaire et les données extraites, basés sur une analyse de cohérence interne.
-    """
     if not _llm_client or (not recto_text and not verso_text): return None
-    
-    # Ce prompt est le nouveau "cerveau" de l'application.
     validation_prompt = f"""
     En tant qu'agent de validation KYC expert pour le Cameroun, ta seule mission est d'analyser les textes OCR d'une CNI.
     Produis un objet JSON unique et valide, sans aucune autre explication.
-
     Le JSON doit contenir deux clés de haut niveau : "verdict" et "donnees_extraites".
-
     1.  Pour la clé "verdict", analyse la cohérence, la complétude et la plausibilité des textes fournis.
         - Si les champs clés (nom, date de naissance, identifiant) sont présents, les formats de date sont corrects (JJ/MM/AAAA), et il y a peu de bruit OCR, la valeur doit être "CONFORME".
         - Dans tous les autres cas (champs manquants, formats de date invalides, texte incohérent ou très bruité), la valeur doit être "VÉRIFICATION MANUELLE REQUISE".
-        - Base ton jugement uniquement sur le texte fourni.
-
     2.  Pour la clé "donnees_extraites", extrais les informations de manière structurée.
         - Les clés doivent être : "nom", "prenoms", "date_naissance", "lieu_naissance", "sexe", "profession", "pere", "mere", "adresse", "date_delivrance", "date_expiration", "identifiant_unique".
         - Si une information n'est pas trouvée, utilise la chaîne "Non trouvé".
-
-    Texte du RECTO :
-    ---
-    {recto_text or "Non fourni"}
-    ---
-
-    Texte du VERSO :
-    ---
-    {verso_text or "Non fourni"}
-    ---
+    Texte du RECTO:---{recto_text or "Non fourni"}---
+    Texte du VERSO:---{verso_text or "Non fourni"}---
     """
     try:
         messages = [{"role": "user", "content": validation_prompt}]
-        response = _llm_client.chat.complete(
-            model="mistral-large-latest", messages=messages, response_format={"type": "json_object"}
-        )
+        response = _llm_client.chat.complete(model="mistral-large-latest", messages=messages, response_format={"type": "json_object"})
         return json.loads(response.choices[0].message.content)
     except Exception as e:
         st.error(f"Erreur API Chat: {e}")
         return None
 
 def process_single_side(side_name, uploaded_file, detection_model):
-    """Encapsule la détection pour une face. Retourne l'image annotée et l'image rognée."""
     pil_image = preprocess_uploaded_file(uploaded_file)
     if not pil_image: return None, None
     annotated_img, box = detect_cni(detection_model, pil_image)
@@ -175,10 +155,30 @@ def display_identity_card(data):
         for key, value in data.items():
             st.text_input(key.replace("_", " ").title(), value, disabled=True, key=f"id_{key}")
 
+def display_results_ui(report, recto_result, verso_result):
+    st.subheader("2. Résultats")
+    if not report:
+        st.warning("⚠️ Vérification Manuelle Requise", icon="❗")
+        st.markdown("La détection a pu fonctionner, mais les données n'ont pas pu être extraites ou validées par l'IA.")
+    else:
+        verdict = report.get("verdict", "VÉRIFICATION MANUELLE REQUISE")
+        id_data = report.get("donnees_extraites")
+        display_verdict(verdict)
+        if id_data:
+            display_identity_card(id_data)
+    
+    st.markdown("##### Documents Analysés")
+    res_col1, res_col2 = st.columns(2)
+    if recto_result: res_col1.image(recto_result, caption="Recto", channels="BGR")
+    if verso_result: res_col2.image(verso_result, caption="Verso", channels="BGR")
+
+# --- APPLICATION PRINCIPALE ---
+
 def main():
     st.set_page_config(page_title="Auto KYC", layout="wide")
     st.title("🆔 Outil de Vérification de CNI")
     st.markdown("Chargez les deux faces d'une carte d'identité pour lancer la vérification.")
+    st.info(f"ℹ️ Pour des résultats optimaux, veuillez utiliser des fichiers (JPG, PNG) de moins de **{MAX_FILE_SIZE_MB} Mo**.", icon="💡")
     st.divider()
 
     detection_model = load_detection_model()
@@ -194,9 +194,15 @@ def main():
 
         if st.button("Lancer la Vérification ✨", type="primary", use_container_width=True):
             if not recto_file or not verso_file:
-                st.warning("Veuillez charger les deux faces de la carte.")
+                st.warning("Veuillez charger les **deux** faces de la carte.")
                 st.stop()
-            
+
+            # <<< BLOC DE VALIDATION DE TAILLE - LA GARANTIE DE STABILITÉ >>>
+            if recto_file.size > MAX_FILE_SIZE_BYTES or verso_file.size > MAX_FILE_SIZE_BYTES:
+                st.error(f"Erreur : Un des fichiers dépasse la taille maximale autorisée de {MAX_FILE_SIZE_MB} Mo. Veuillez compresser ou redimensionner vos images avant de les téléverser.")
+                st.stop()
+            # <<< FIN DU BLOC DE VALIDATION >>>
+
             with st.spinner("Analyse en cours..."):
                 annotated_recto, crop_recto = process_single_side("Recto", recto_file, detection_model)
                 annotated_verso, crop_verso = process_single_side("Verso", verso_file, detection_model)
@@ -210,37 +216,12 @@ def main():
                 if crop_verso:
                     with io.BytesIO() as buf: crop_verso.save(buf, format='PNG'); verso_text = get_text_from_image_via_ocr(llm_client, buf.getvalue())
                 
-                report = None
-                if recto_text or verso_text:
-                    report = get_kyc_verdict_and_data(llm_client, recto_text, verso_text)
-                
+                report = get_kyc_verdict_and_data(llm_client, recto_text, verso_text)
                 st.session_state.report = report
 
     with col_results:
-        st.subheader("2. Résultats")
-        if 'report' in st.session_state and st.session_state.report:
-            report = st.session_state.report
-            verdict = report.get("verdict", "VÉRIFICATION MANUELLE REQUISE")
-            id_data = report.get("donnees_extraites")
-
-            display_verdict(verdict)
-
-            if id_data:
-                display_identity_card(id_data)
-
-            st.markdown("##### Documents Analysés")
-            res_col1, res_col2 = st.columns(2)
-            if 'annotated_recto' in st.session_state: res_col1.image(st.session_state.annotated_recto, caption="Recto", channels="BGR")
-            if 'annotated_verso' in st.session_state: res_col2.image(st.session_state.annotated_verso, caption="Verso", channels="BGR")
-        
-        elif 'annotated_recto' in st.session_state or 'annotated_verso' in st.session_state:
-             # Gère le cas où la détection a fonctionné mais l'OCR/LLM a échoué
-            st.warning("⚠️ Vérification Manuelle Requise", icon="❗")
-            st.markdown("La détection a fonctionné, mais les données n'ont pas pu être extraites ou validées.")
-            st.markdown("##### Documents Analysés")
-            res_col1, res_col2 = st.columns(2)
-            if 'annotated_recto' in st.session_state: res_col1.image(st.session_state.annotated_recto, caption="Recto", channels="BGR")
-            if 'annotated_verso' in st.session_state: res_col2.image(st.session_state.annotated_verso, caption="Verso", channels="BGR")
+        if 'report' in st.session_state:
+            display_results_ui(st.session_state.get('report'), st.session_state.get('annotated_recto'), st.session_state.get('annotated_verso'))
         else:
             st.info("Les résultats de la vérification apparaîtront ici.")
 
