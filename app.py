@@ -178,8 +178,8 @@ def main():
     st.set_page_config(page_title="Auto KYC", layout="wide")
     st.title("🆔 Outil de Vérification de CNI")
     st.markdown("Chargez les deux faces d'une carte d'identité pour lancer la vérification.")
-    st.info(f"ℹ️ Pour des résultats optimaux, veuillez utiliser des fichiers (JPG, PNG) de moins de **{MAX_FILE_SIZE_MB} Mo**.", icon="💡")
-    st.divider()
+    st.info(f"ℹ️ vos données d'intentité sont sécurisées , donc pas stockées!! , icon="💡")
+    st.divider() 
 
     detection_model = load_detection_model()
     llm_client = load_llm_client()
