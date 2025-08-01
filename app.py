@@ -240,4 +240,4 @@ def main():
             st.info("Les résultats de la vérification apparaîtront ici.")
 
 if __name__ == "__main__":
-     main() 
+    main()
