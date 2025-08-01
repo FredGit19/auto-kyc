@@ -7,7 +7,7 @@
 # - Prompting: Precision-engineered prompt for reliable, unbiased data extraction and textual coherence scoring.
 # - UX: Non-blocking feel, clear status updates, and factual reporting without subjective AI comments.
 # ==========================================================================================
-
+import base64
 import streamlit as st
 import torch
 import cv2
@@ -15,7 +15,8 @@ import numpy as np
 import json
 from PIL import Image
 import io
-import fitz  # PyMuPDF
+import fitz  
+import PyMuPDF
 import os
 import time
 
@@ -133,14 +134,34 @@ def detect_cni(model, pil_image):
     return image_cv, best_box
 
 @st.cache_data(show_spinner=False)
+# --- PIPELINE DE TRAITEMENT OPTIMISÉ (SECTION CORRIGÉE) ---
+
+@st.cache_data(show_spinner=False)
 def get_text_from_cni_crop(_llm_client, image_bytes):
-    """Appel unique à l'OCR de Mistral, avec gestion d'erreur."""
+    """
+    Appel unique à l'OCR de Mistral, utilisant le format d'appel API correct.
+    """
     try:
-        # Mistral prend en charge l'encodage base64 directement via les `files`
-        response = _llm_client.ocr.process(model="mistral-ocr-2505", files=[image_bytes])
+        # Étape 1: Encoder l'image en base64, le format requis par l'API pour les data URLs.
+        base64_image = base64.b64encode(image_bytes).decode('utf-8')
+        
+        # Étape 2: Créer l'objet 'document' conforme à la spécification de l'API.
+        document_source = {
+            "type": "image_url",
+            "image_url": f"data:image/png;base64,{base64_image}"
+        }
+        
+        # Étape 3: Appeler la méthode avec le bon nom d'argument ('document').
+        response = _llm_client.ocr.process(
+            model="mistral-ocr-2505", 
+            document=document_source
+        )
+        
         return "\n".join(page.markdown for page in response.pages)
+    
     except Exception as e:
-        st.error(f"Erreur API OCR Mistral: {e}")
+        # Fournir un message d'erreur plus utile pour le débogage.
+        st.error(f"Erreur lors de l'appel à l'API OCR de Mistral. Vérifiez votre clé API et les données envoyées. Détails: {e}")
         return None
 
 @st.cache_data(show_spinner=False)
