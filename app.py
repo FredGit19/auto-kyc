@@ -1,204 +1,304 @@
-# ==============================================================================
-# APPLICATION STREAMLIT - VERSION FINALE ET ROBUSTE
-# ==============================================================================
-# Corrections et améliorations clés :
-# - COHÉRENCE TOTALE : Utilise Albumentations pour le pré-traitement, comme dans 
-#   le script d'entraînement, afin d'éliminer toute désynchronisation.
-# - ROBUSTESSE : Gestion améliorée des erreurs de chargement et de détection.
-# - CLARTÉ : Code et commentaires améliorés pour une meilleure compréhension.
-# ==============================================================================
+# ==========================================================================================
+# APPLICATION "AUTO KYC" - ARCHITECTURE FINALE ET ROBUSTE v2.0
+# ==========================================================================================
+# Expert Review & Refactoring:
+# - Performance: Handles large files via pre-processing (resizing, PDF image extraction).
+# - Speed: Leverages GPU for detection, smart caching.
+# - Prompting: Precision-engineered prompt for reliable, unbiased data extraction and textual coherence scoring.
+# - UX: Non-blocking feel, clear status updates, and factual reporting without subjective AI comments.
+# ==========================================================================================
 
 import streamlit as st
 import torch
 import cv2
 import numpy as np
-import easyocr
+import json
 from PIL import Image
-import albumentations as A
-from albumentations.pytorch import ToTensorV2
+import io
+import fitz  # PyMuPDF
+import os
+import time
+
+# --- Importations locales ---
 from torchvision.models.detection import fasterrcnn_resnet50_fpn
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
+from torchvision.transforms import v2 as T
+# Assurez-vous d'avoir une API Key Mistral dans vos secrets
+try:
+    from mistralai import Mistral
+except ImportError:
+    st.error("La bibliothèque Mistral AI n'est pas installée. Veuillez exécuter `pip install mistralai`.")
+    st.stop()
 
-# --- CONFIGURATION ET CHARGEMENT DES MODÈLES (Sécurisé par cache) ---
-
-MODEL_PATH = "models/frcnn_cni_best.pth" # Assurez-vous que le chemin est correct
+# --- CONFIGURATION DU PROJET ---
+MODEL_PATH = "frcnn_cni_best_safe.pth"
+# Utiliser le GPU si disponible, c'est une optimisation majeure de la vitesse.
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-CONFIDENCE_THRESHOLD = 0.7 # Seuil de confiance
+CONFIDENCE_THRESHOLD = 0.8
+# Limite de taille d'image pour le traitement afin d'éviter les crashs mémoire et les temps de traitement excessifs.
+MAX_IMAGE_DIMENSION = 1280
 
-def get_model_architecture(num_classes):
-    """
-    DÉFINITION IDENTIQUE À L'ENTRAÎNEMENT :
-    Construit l'architecture exacte du modèle pour pouvoir charger les poids.
-    """
-    model = fasterrcnn_resnet50_fpn(weights=None)
-    in_features = model.roi_heads.box_predictor.cls_score.in_features
-    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
-    return model
+# --- FONCTIONS DE CHARGEMENT (Mise en cache) ---
 
 @st.cache_resource
 def load_detection_model():
-    """Charge le modèle de détection Faster R-CNN entraîné."""
+    """Charge le modèle de détection Faster R-CNN."""
     try:
-        # 1. Créer l'architecture vide
-        model = get_model_architecture(num_classes=2) # 1 classe (CNI) + 1 fond
-        
-        # 2. Charger le checkpoint (poids, etc.)
-        checkpoint = torch.load(MODEL_PATH, map_location=DEVICE)
-        
-        # 3. Charger les poids dans l'architecture
-        model.load_state_dict(checkpoint['model_state_dict'])
-        
+        model = fasterrcnn_resnet50_fpn(weights=None)
+        in_features = model.roi_heads.box_predictor.cls_score.in_features
+        model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes=2)
+        # Il est crucial que le modèle ait été entraîné et sauvegardé correctement.
+        # Ici, on suppose un .pth contenant uniquement le state_dict.
+        model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
         model.to(DEVICE)
-        model.eval() # Mettre le modèle en mode évaluation (très important !)
-        print("Modèle de détection chargé avec succès sur le device:", DEVICE)
+        model.eval()
         return model
     except FileNotFoundError:
-        st.error(f"ERREUR CRITIQUE : Le fichier du modèle est introuvable au chemin '{MODEL_PATH}'.")
-        st.error("Vérifiez que le modèle 'frcnn_cni_best.pth' se trouve bien dans le dossier 'models/'.")
+        st.error(f"FATAL: Le fichier du modèle '{MODEL_PATH}' est introuvable. L'application ne peut pas démarrer.")
         return None
     except Exception as e:
-        st.error(f"Une erreur est survenue lors du chargement du modèle de détection : {e}")
+        st.error(f"Erreur critique au chargement du modèle de détection: {e}")
         return None
 
 @st.cache_resource
-def load_ocr_model():
-    """Charge le modèle EasyOCR pour la reconnaissance de texte."""
+def load_llm_client():
+    """Initialise le client Mistral AI à partir des secrets Streamlit."""
+    if "MISTRAL_API_KEY" not in st.secrets:
+        st.error("FATAL: La clé MISTRAL_API_KEY n'est pas configurée dans les secrets de Streamlit.")
+        return None
     try:
-        reader = easyocr.Reader(['fr', 'en'], gpu=torch.cuda.is_available())
-        print("Modèle OCR chargé avec succès.")
-        return reader
+        client = Mistral(api_key=st.secrets["MISTRAL_API_KEY"])
+        return client
     except Exception as e:
-        st.error(f"Une erreur est survenue lors du chargement du modèle OCR : {e}")
+        st.error(f"Erreur d'initialisation du client Mistral: {e}")
         return None
 
-# --- FONCTIONS DE TRAITEMENT AVEC LA CORRECTION DÉFINITIVE ---
+# --- PIPELINE DE TRAITEMENT OPTIMISÉ ---
 
-def get_inference_transforms():
+def preprocess_uploaded_file(uploaded_file):
     """
-    LA CORRECTION CLÉ : Utilise le même pipeline de validation que l'entraînement.
+    Gère les PDF et les images lourdes.
+    Extrait la première image d'un PDF ou redimensionne une image trop grande.
     """
-    return A.Compose([
-        A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]), # Normalisation ImageNet
-        ToTensorV2(), # Convertit en Tensor PyTorch
-    ])
+    if uploaded_file is None:
+        return None
+
+    file_bytes = uploaded_file.getvalue()
+    
+    if uploaded_file.type == "application/pdf":
+        try:
+            pdf_document = fitz.open(stream=file_bytes, filetype="pdf")
+            if pdf_document.page_count == 0:
+                st.warning(f"Le fichier PDF '{uploaded_file.name}' est vide ou corrompu.")
+                return None
+            first_page = pdf_document.load_page(0)
+            pix = first_page.get_pixmap(dpi=200) # Augmenter le DPI pour une meilleure qualité
+            image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        except Exception as e:
+            st.error(f"Erreur lors de la lecture du PDF '{uploaded_file.name}': {e}")
+            return None
+    else:
+        image = Image.open(io.BytesIO(file_bytes)).convert("RGB")
+
+    # Redimensionnement systématique pour la performance
+    if image.width > MAX_IMAGE_DIMENSION or image.height > MAX_IMAGE_DIMENSION:
+        image.thumbnail((MAX_IMAGE_DIMENSION, MAX_IMAGE_DIMENSION), Image.Resampling.LANCZOS)
+        
+    return image
 
 def detect_cni(model, pil_image):
-    """
-    Effectue la détection sur une image en utilisant le pipeline de transformation correct.
-    """
-    if model is None: return None, None
-        
-    # 1. Convertir l'image PIL en tableau NumPy, format attendu par Albumentations
-    image_np = np.array(pil_image.convert('RGB'))
-    
-    # 2. Appliquer les transformations
-    transforms = get_inference_transforms()
-    transformed = transforms(image=image_np)
-    image_tensor = transformed['image'].to(DEVICE)
-    
-    # 3. Le modèle attend un "batch" d'images, même s'il n'y en a qu'une
-    image_tensor = image_tensor.unsqueeze(0) 
-    
+    """Détecte la CNI sur une image PIL, retourne une image annotée (OpenCV) et les coordonnées."""
+    image_tensor = T.Compose([T.ToImage(), T.ToDtype(torch.float32, scale=True)])(pil_image).to(DEVICE)
     with torch.no_grad():
-        prediction = model(image_tensor)
+        prediction = model([image_tensor])
         
-    # 4. Extraire et filtrer les résultats
     boxes = prediction[0]['boxes'].cpu().numpy()
     scores = prediction[0]['scores'].cpu().numpy()
     
     best_box = None
     max_score = 0
-    # On prend la boîte avec le plus haut score au-dessus du seuil
-    for box, score in zip(boxes, scores):
-        if score > CONFIDENCE_THRESHOLD and score > max_score:
-            max_score = score
-            best_box = box
+    if len(boxes) > 0:
+        best_idx = np.argmax(scores)
+        if scores[best_idx] > CONFIDENCE_THRESHOLD:
+            max_score = scores[best_idx]
+            best_box = boxes[best_idx]
 
-    # Dessiner le résultat sur l'image originale (au format OpenCV)
     image_cv = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
     if best_box is not None:
         x1, y1, x2, y2 = map(int, best_box)
-        cv2.rectangle(image_cv, (x1, y1), (x2, y2), (36, 255, 12), 2) # Couleur verte vive
-        label = f"CNI: {max_score:.2f}"
-        cv2.putText(image_cv, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (36, 255, 12), 2)
-    
+        cv2.rectangle(image_cv, (x1, y1), (x2, y2), (0, 255, 0), 3)
+        label = f"CNI Détectée: {max_score:.2f}"
+        cv2.putText(image_cv, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+        
     return image_cv, best_box
 
-def parse_ocr_results(ocr_results):
-    """
-    Tente de parser les résultats bruts d'EasyOCR. C'est une heuristique.
-    """
-    # ... (le code de parsing reste le même, il est à adapter selon les résultats)
-    extracted_data = {"NOM": "Non trouvé", "PRENOMS": "Non trouvé", "DATE_NAISSANCE": "Non trouvé"}
-    full_text = " ".join([res[1] for res in ocr_results])
-    
-    for i, res in enumerate(ocr_results):
-        text = res[1].upper()
-        if "NOM" in text and i + 1 < len(ocr_results):
-            extracted_data["NOM"] = ocr_results[i+1][1]
-        if "PRENOMS" in text and i + 1 < len(ocr_results):
-            extracted_data["PRENOMS"] = ocr_results[i+1][1]
-        if "NEE LE" in text or "NE LE" in text and i + 1 < len(ocr_results):
-            extracted_data["DATE_NAISSANCE"] = ocr_results[i+1][1]
-            
-    return extracted_data, full_text
+@st.cache_data(show_spinner=False)
+def get_text_from_cni_crop(_llm_client, image_bytes):
+    """Appel unique à l'OCR de Mistral, avec gestion d'erreur."""
+    try:
+        # Mistral prend en charge l'encodage base64 directement via les `files`
+        response = _llm_client.ocr.process(model="mistral-ocr-2505", files=[image_bytes])
+        return "\n".join(page.markdown for page in response.pages)
+    except Exception as e:
+        st.error(f"Erreur API OCR Mistral: {e}")
+        return None
 
-# --- INTERFACE UTILISATEUR STREAMLIT ---
+@st.cache_data(show_spinner=False)
+def perform_kyc_analysis(_llm_client, recto_text, verso_text):
+    """
+    PROMPT DE PRÉCISION V2.0 :
+    - Objectif clair: Validation de cohérence textuelle et extraction de données.
+    - Contraintes fortes: Format JSON strict, pas de baratin.
+    - Logique de scoring définie: Le LLM est guidé sur *comment* calculer le score.
+    """
+    if not recto_text and not verso_text:
+        return None
+
+    expert_prompt = f"""
+    En tant qu'agent de vérification KYC, analyse les textes extraits d'une CNI camerounaise.
+    Ta mission est d'évaluer la cohérence TEXTUELLE et d'extraire les données.
+    Produis un objet JSON valide sans aucune explication préliminaire.
+
+    Le JSON doit contenir deux clés de haut niveau: "analyse_coherence" et "donnees_extraites".
+
+    1.  Pour "analyse_coherence":
+        - "score_coherence_textuelle": Un entier de 0 à 100. Calcule ce score en te basant sur:
+            - La présence de champs clés (nom, date de naissance, identifiant).
+            - La validité du format des dates (JJ/MM/AAAA).
+            - L'absence de caractères visiblement erronés ou de "bruit OCR".
+            - La cohérence entre la date de délivrance et d'expiration.
+        - "points_verification": Une liste de chaînes de caractères décrivant les points positifs et négatifs observés (ex: "Format de la date de naissance valide.", "Bruit OCR détecté dans la section 'adresse'.").
+
+    2.  Pour "donnees_extraites":
+        - Extrais les informations dans les clés suivantes: "nom", "prenoms", "date_naissance", "lieu_naissance", "sexe", "profession", "pere", "mere", "adresse", "date_delivrance", "date_expiration", "identifiant_unique".
+        - Si une information n'est pas présente dans les textes fournis, utilise la chaîne de caractères "Non trouvé".
+
+    Texte du RECTO:
+    ---
+    {recto_text or "Non fourni"}
+    ---
+
+    Texte du VERSO:
+    ---
+    {verso_text or "Non fourni"}
+    ---
+    """
+    try:
+        messages = [{"role": "user", "content": expert_prompt}]
+        chat_response = _llm_client.chat.complete(
+            model="mistral-large-latest", messages=messages, response_format={"type": "json_object"}
+        )
+        return json.loads(chat_response.choices[0].message.content)
+    except Exception as e:
+        st.error(f"Erreur API Chat Mistral: {e}")
+        return None
+
+# --- COMPOSANTS D'INTERFACE (UI) ---
+
+def display_results(report):
+    """Affiche le rapport final de manière structurée."""
+    st.subheader("2. Résultats de la Vérification")
+    
+    auth_data = report.get("analyse_coherence")
+    id_data = report.get("donnees_extraites")
+
+    if not auth_data or not id_data:
+        st.error("Le rapport généré par l'IA est incomplet ou malformé.")
+        return
+
+    # Section 1: Analyse de Cohérence
+    with st.container(border=True):
+        st.markdown("##### Analyse de Cohérence Textuelle")
+        score = auth_data.get('score_coherence_textuelle', 0)
+        
+        if score > 85: color, label = "green", "Cohérence Élevée"
+        elif score > 60: color, label = "orange", "Cohérence Moyenne"
+        else: color, label = "red", "Cohérence Faible"
+        
+        st.progress(score, text=f"Score: {score}/100 - {label}")
+        
+        with st.expander("Détails de la vérification"):
+            for point in auth_data.get('points_verification', []):
+                st.markdown(f"- {point}")
+
+    # Section 2: Fiche d'Identité
+    with st.container(border=True):
+        st.markdown("##### Fiche d'Identité Extraite")
+        for key, value in id_data.items():
+            st.text_input(label=key.replace("_", " ").title(), value=value, disabled=True, key=f"id_{key}")
+
+    # Section 3: Images traitées
+    st.markdown("##### Images Analysées")
+    res_col1, res_col2 = st.columns(2)
+    if 'recto_img' in st.session_state:
+        res_col1.image(st.session_state.recto_img, caption="Recto traité", channels="BGR", use_column_width=True)
+    if 'verso_img' in st.session_state:
+        res_col2.image(st.session_state.verso_img, caption="Verso traité", channels="BGR", use_column_width=True)
+
+# --- APPLICATION PRINCIPALE ---
 
 def main():
-    st.set_page_config(page_title="Analyseur de CNI", layout="wide", initial_sidebar_state="auto")
-    st.title("🤖 Analyseur de Carte Nationale d'Identité")
-    st.markdown("---")
+    st.set_page_config(page_title="Auto KYC", layout="wide", initial_sidebar_state="collapsed")
+    st.title("🆔 Auto KYC")
+    st.markdown("Système expert pour la **Vérification de Cohérence** et l'**Extraction de Données** des CNI.")
+    st.divider()
 
-    st.sidebar.header("Instructions")
-    st.sidebar.info(
-        "1. Chargez une image claire et bien cadrée de la CNI.\n\n"
-        "2. Cliquez sur le bouton 'Lancer l'analyse'.\n\n"
-        "3. L'application va d'abord localiser la carte (boîte verte), puis lire les informations qu'elle contient."
-    )
+    # Charger les modèles une seule fois au démarrage
+    detection_model = load_detection_model()
+    llm_client = load_llm_client()
+    if not detection_model or not llm_client:
+        st.warning("Un ou plusieurs modèles n'ont pas pu être chargés. L'application est en mode dégradé.")
+        st.stop()
 
-    uploaded_file = st.file_uploader(
-        "Déposez une image ici ou cliquez pour parcourir vos fichiers", 
-        type=["jpg", "jpeg", "png"]
-    )
+    col_actions, col_resultats = st.columns([2, 3])
+    with col_actions:
+        st.subheader("1. Charger les Documents")
+        recto_file = st.file_uploader("Chargez le RECTO (Image ou PDF)", type=["jpg", "jpeg", "png", "pdf"])
+        verso_file = st.file_uploader("Chargez le VERSO (Image ou PDF)", type=["jpg", "jpeg", "png", "pdf"])
 
-    if uploaded_file:
-        col1, col2 = st.columns(2)
-        pil_image = Image.open(uploaded_file)
-        
-        with col1:
-            st.subheader("Image Originale")
-            st.image(pil_image, use_column_width=True)
-
-        if st.button("🚀 Lancer l'analyse", use_container_width=True, type="primary"):
-            detection_model = load_detection_model()
-            ocr_model = load_ocr_model()
-
-            if detection_model and ocr_model:
-                with col2:
-                    st.subheader("Résultats de l'Analyse")
-                    with st.spinner("Étape 1/2 : Détection de la carte en cours..."):
-                        detected_image, box = detect_cni(detection_model, pil_image)
+        if st.button("Lancer la Vérification ✨", type="primary", use_container_width=True):
+            if not recto_file and not verso_file:
+                st.warning("Veuillez charger au moins une face de la carte.")
+            else:
+                # Nettoyer l'état de la session précédente
+                for key in list(st.session_state.keys()):
+                    if key not in ['detection_model', 'llm_client']: # Ne pas effacer les modèles cachés
+                        del st.session_state[key]
+                
+                with st.spinner("Analyse en cours..."):
+                    recto_text, verso_text = None, None
                     
-                    if box is None:
-                        st.warning("Aucune CNI n'a pu être détectée avec certitude. Essayez une image plus nette ou mieux cadrée.")
-                        st.image(detected_image, channels="BGR", use_column_width=True, caption="Tentative de détection.")
-                    else:
-                        st.success("✅ CNI localisée !")
-                        st.image(detected_image, channels="BGR", use_column_width=True, caption="CNI détectée sur l'image.")
-                        
-                        with st.spinner("Étape 2/2 : Lecture des informations (OCR)..."):
+                    pil_recto = preprocess_uploaded_file(recto_file)
+                    if pil_recto:
+                        detected_img, box = detect_cni(detection_model, pil_recto)
+                        st.session_state.recto_img = detected_img
+                        if box is not None:
                             x1, y1, x2, y2 = map(int, box)
-                            cni_crop = pil_image.crop((x1, y1, x2, y2))
-                            ocr_results = ocr_model.readtext(np.array(cni_crop))
-                            structured_data, raw_text = parse_ocr_results(ocr_results)
-                        
-                        st.success("✅ Lecture terminée !")
-                        st.write("#### Informations Extraites")
-                        st.json(structured_data)
-                        
-                        with st.expander("Afficher le texte brut extrait"):
-                            st.text_area("", raw_text, height=150)
+                            crop = pil_recto.crop((x1, y1, x2, y2))
+                            with io.BytesIO() as buf:
+                                crop.save(buf, format='PNG')
+                                recto_text = get_text_from_cni_crop(llm_client, buf.getvalue())
+
+                    pil_verso = preprocess_uploaded_file(verso_file)
+                    if pil_verso:
+                        detected_img, box = detect_cni(detection_model, pil_verso)
+                        st.session_state.verso_img = detected_img
+                        if box is not None:
+                            x1, y1, x2, y2 = map(int, box)
+                            crop = pil_verso.crop((x1, y1, x2, y2))
+                            with io.BytesIO() as buf:
+                                crop.save(buf, format='PNG')
+                                verso_text = get_text_from_cni_crop(llm_client, buf.getvalue())
+
+                    if recto_text or verso_text:
+                        final_report = perform_kyc_analysis(llm_client, recto_text, verso_text)
+                        st.session_state.final_report = final_report
+
+    with col_resultats:
+        if 'final_report' in st.session_state and st.session_state.final_report:
+            display_results(st.session_state.final_report)
+        else:
+            st.info("Les résultats de la vérification apparaîtront ici.")
 
 if __name__ == "__main__":
     main()
