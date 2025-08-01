@@ -1,12 +1,11 @@
 # ==========================================================================================
-# APPLICATION "AUTO KYC" - v4.0 - VERSION "ARBITRAGE"
+# APPLICATION "AUTO KYC" - v4.0 - VERSION "VERDICT & EXTRACTION"
 # ==========================================================================================
-# Objectif : Fournir un verdict binaire ("Conforme" / "Vérification Manuelle") et une fiche d'identité.
-# Logique d'Authentification :
-# 1. Détection Visuelle > Seuil de confiance élevé.
-# 2. Analyse par LLM pour vérifier la complétude des champs critiques et la cohérence des données.
-# 3. Le LLM retourne un verdict de conformité textuelle qui, combiné à la détection, donne le résultat final.
-# UI : Interface épurée, sans score ni détails techniques, pour une expérience utilisateur directe.
+# Flux de Travail Simplifié pour l'Opérateur :
+# 1. Chargement des documents.
+# 2. L'IA effectue une analyse de conformité en arrière-plan.
+# 3. Affichage d'un verdict clair ("Conforme" / "Vérification Manuelle Requise").
+# 4. Affichage des données extraites si le document est jugé conforme.
 # ==========================================================================================
 
 import streamlit as st
@@ -32,11 +31,12 @@ except ImportError:
 # --- CONFIGURATION GLOBALE ---
 MODEL_PATH = "frcnn_cni_best_safe.pth"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# Seuil de détection visuelle plus strict pour la conformité
-DETECTION_THRESHOLD_CONFORMITY = 0.90 
+CONFIDENCE_THRESHOLD = 0.8
 MAX_IMAGE_DIMENSION = 1280
+# Seuil de score de cohérence pour déclarer un document "Conforme"
+CONFORMITY_THRESHOLD_SCORE = 75
 
-# --- INITIALISATION DES RESSOURCES ---
+# --- INITIALISATION DES RESSOURCES (Mise en cache) ---
 
 @st.cache_resource
 def load_detection_model():
@@ -64,7 +64,7 @@ def load_llm_client():
         st.error(f"Erreur d'initialisation du client Mistral: {e}")
         return None
 
-# --- PIPELINE DE TRAITEMENT ---
+# --- PIPELINE DE TRAITEMENT MODULAIRE ---
 
 def preprocess_uploaded_file(uploaded_file):
     if not uploaded_file: return None
@@ -75,18 +75,23 @@ def preprocess_uploaded_file(uploaded_file):
         if image.width > MAX_IMAGE_DIMENSION or image.height > MAX_IMAGE_DIMENSION:
             image.thumbnail((MAX_IMAGE_DIMENSION, MAX_IMAGE_DIMENSION), Image.Resampling.LANCZOS)
         return image
-    except Exception:
-        return None
+    except Exception: return None
 
 def detect_cni(model, pil_image):
-    if not model or not pil_image: return None, 0.0
+    if not model or not pil_image: return None, None
     image_tensor = T.Compose([T.ToImage(), T.ToDtype(torch.float32, scale=True)])(pil_image).to(DEVICE)
     with torch.no_grad():
         prediction = model([image_tensor])
     boxes, scores = prediction[0]['boxes'].cpu().numpy(), prediction[0]['scores'].cpu().numpy()
-    if len(scores) == 0: return None, 0.0
+    if len(scores) == 0: return cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR), None
     best_idx = np.argmax(scores)
-    return boxes[best_idx], scores[best_idx]
+    best_score = scores[best_idx]
+    if best_score < CONFIDENCE_THRESHOLD: return cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR), None
+    best_box = boxes[best_idx]
+    image_cv = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+    x1, y1, x2, y2 = map(int, best_box)
+    cv2.rectangle(image_cv, (x1, y1), (x2, y2), (34, 139, 34), 3)
+    return image_cv, best_box
 
 @st.cache_data(show_spinner=False)
 def get_text_from_image_via_ocr(_llm_client, image_bytes):
@@ -96,133 +101,146 @@ def get_text_from_image_via_ocr(_llm_client, image_bytes):
         document = {"type": "image_url", "image_url": f"data:image/png;base64,{base64_image}"}
         response = _llm_client.ocr.process(model="mistral-ocr-2505", document=document)
         return "\n".join(page.markdown for page in response.pages)
-    except Exception:
+    except Exception as e:
+        st.error(f"Erreur API OCR: {e}")
         return None
 
 @st.cache_data(show_spinner=False)
-def perform_kyc_analysis(_llm_client, recto_text, verso_text):
+def get_kyc_verdict_and_data(_llm_client, recto_text, verso_text):
     """
-    PROMPT D'ARBITRAGE v4.0 :
-    - Objectif : Extraire les données ET retourner un verdict de conformité textuelle.
+    PROMPT DE VALIDATION V4.0 :
+    Demande un verdict binaire et les données extraites, basés sur une analyse de cohérence interne.
     """
     if not _llm_client or (not recto_text and not verso_text): return None
-    prompt = f"""
-    Tu es un agent de vérification KYC spécialisé dans les CNI Camerounaises.
-    Ta mission est d'analyser le texte extrait et de retourner un objet JSON valide sans aucune explication.
-    Le JSON doit contenir deux clés : "conformite_textuelle" (un booléen) et "donnees_extraites".
+    
+    # Ce prompt est le nouveau "cerveau" de l'application.
+    validation_prompt = f"""
+    En tant qu'agent de validation KYC expert pour le Cameroun, ta seule mission est d'analyser les textes OCR d'une CNI.
+    Produis un objet JSON unique et valide, sans aucune autre explication.
 
-    1. Pour déterminer "conformite_textuelle" (true/false):
-       - Le document est NON CONFORME si l'un des champs critiques suivants est manquant : 'nom', 'prenoms', 'date_naissance', 'identifiant_unique'.
-       - Le document est NON CONFORME si le format des dates est invalide.
-       - Le document est NON CONFORME s'il y a un bruit OCR excessif.
-       - Sinon, le document est CONFORME.
+    Le JSON doit contenir deux clés de haut niveau : "verdict" et "donnees_extraites".
 
-    2. Pour "donnees_extraites":
-       - Extrais les informations suivantes : "nom", "prenoms", "date_naissance", "lieu_naissance", "sexe", "profession", "pere", "mere", "adresse", "date_delivrance", "date_expiration", "identifiant_unique".
-       - Utilise "Non trouvé" si une information est absente.
+    1.  Pour la clé "verdict", analyse la cohérence, la complétude et la plausibilité des textes fournis.
+        - Si les champs clés (nom, date de naissance, identifiant) sont présents, les formats de date sont corrects (JJ/MM/AAAA), et il y a peu de bruit OCR, la valeur doit être "CONFORME".
+        - Dans tous les autres cas (champs manquants, formats de date invalides, texte incohérent ou très bruité), la valeur doit être "VÉRIFICATION MANUELLE REQUISE".
+        - Base ton jugement uniquement sur le texte fourni.
 
-    RECTO: --- {recto_text or "Non fourni"} ---
-    VERSO: --- {verso_text or "Non fourni"} ---
+    2.  Pour la clé "donnees_extraites", extrais les informations de manière structurée.
+        - Les clés doivent être : "nom", "prenoms", "date_naissance", "lieu_naissance", "sexe", "profession", "pere", "mere", "adresse", "date_delivrance", "date_expiration", "identifiant_unique".
+        - Si une information n'est pas trouvée, utilise la chaîne "Non trouvé".
+
+    Texte du RECTO :
+    ---
+    {recto_text or "Non fourni"}
+    ---
+
+    Texte du VERSO :
+    ---
+    {verso_text or "Non fourni"}
+    ---
     """
     try:
-        messages = [{"role": "user", "content": prompt}]
-        response = _llm_client.chat.complete(model="mistral-large-latest", messages=messages, response_format={"type": "json_object"})
+        messages = [{"role": "user", "content": validation_prompt}]
+        response = _llm_client.chat.complete(
+            model="mistral-large-latest", messages=messages, response_format={"type": "json_object"}
+        )
         return json.loads(response.choices[0].message.content)
-    except Exception:
+    except Exception as e:
+        st.error(f"Erreur API Chat: {e}")
         return None
 
-def process_single_side(side_name, uploaded_file, detection_model, llm_client):
+def process_single_side(side_name, uploaded_file, detection_model):
+    """Encapsule la détection pour une face. Retourne l'image annotée et l'image rognée."""
     pil_image = preprocess_uploaded_file(uploaded_file)
-    if not pil_image: return None
-
-    box, score = detect_cni(detection_model, pil_image)
-    if box is None:
-        return {"conformity_check": False, "reason": f"Aucune CNI détectée sur le {side_name}.", "data": None}
-
-    if score < DETECTION_THRESHOLD_CONFORMITY:
-        return {"conformity_check": False, "reason": f"Détection de CNI sur le {side_name} jugée peu fiable (score: {score:.2f}).", "data": None}
-
+    if not pil_image: return None, None
+    annotated_img, box = detect_cni(detection_model, pil_image)
+    if box is None: return annotated_img, None
     try:
         crop_box = tuple(map(int, box))
-        crop = pil_image.crop(crop_box)
-        with io.BytesIO() as buf:
-            crop.save(buf, format='PNG')
-            image_bytes = buf.getvalue()
-        
-        text = get_text_from_image_via_ocr(llm_client, image_bytes)
-        if not text:
-            return {"conformity_check": False, "reason": f"La lecture du texte (OCR) a échoué sur le {side_name}.", "data": None}
-        
-        return {"conformity_check": True, "reason": "Détection visuelle et lecture réussies.", "data": text}
-    except Exception:
-        return {"conformity_check": False, "reason": f"Erreur technique lors du traitement du {side_name}.", "data": None}
+        crop_img = pil_image.crop(crop_box)
+        return annotated_img, crop_img
+    except Exception: return annotated_img, None
 
 # --- INTERFACE UTILISATEUR (UI) ---
 
+def display_verdict(verdict_text):
+    if verdict_text == "CONFORME":
+        st.success("✅ CNI Présente et Conforme", icon="✔")
+    else:
+        st.warning("⚠️ Vérification Manuelle Requise", icon="❗")
+
 def display_identity_card(data):
+    st.subheader("Fiche d'Identité Extraite")
     with st.container(border=True):
-        st.markdown("##### Fiche d'Identité")
         for key, value in data.items():
             st.text_input(key.replace("_", " ").title(), value, disabled=True, key=f"id_{key}")
 
 def main():
     st.set_page_config(page_title="Auto KYC", layout="wide")
-    st.title("🆔 Système de Vérification d'Identité")
-    st.markdown("Chargez les deux faces de la carte nationale d'identité pour lancer la vérification.")
+    st.title("🆔 Outil de Vérification de CNI")
+    st.markdown("Chargez les deux faces d'une carte d'identité pour lancer la vérification.")
     st.divider()
 
-    models = {'detection': load_detection_model(), 'llm': load_llm_client()}
-    if not models['detection'] or not models['llm']:
-        st.error("Un composant critique est manquant. L'application ne peut pas démarrer.")
+    detection_model = load_detection_model()
+    llm_client = load_llm_client()
+    if not detection_model or not llm_client:
         st.stop()
 
     col_actions, col_results = st.columns([2, 3])
     with col_actions:
-        st.subheader("1. Charger les documents")
-        recto_file = st.file_uploader("Chargez le RECTO (Image/PDF)", type=["jpg", "jpeg", "png"])
-        verso_file = st.file_uploader("Chargez le VERSO (Image/PDF)", type=["jpg", "jpeg", "png"])
+        st.subheader("1. Charger les Documents")
+        recto_file = st.file_uploader("Chargez le RECTO (Image)", type=["jpg", "jpeg", "png"])
+        verso_file = st.file_uploader("Chargez le VERSO (Image)", type=["jpg", "jpeg", "png"])
 
         if st.button("Lancer la Vérification ✨", type="primary", use_container_width=True):
             if not recto_file or not verso_file:
-                st.warning("Veuillez charger les DEUX faces de la carte.")
+                st.warning("Veuillez charger les deux faces de la carte.")
                 st.stop()
             
             with st.spinner("Analyse en cours..."):
-                recto_result = process_single_side("Recto", recto_file, models['detection'], models['llm'])
-                verso_result = process_single_side("Verso", verso_file, models['detection'], models['llm'])
+                annotated_recto, crop_recto = process_single_side("Recto", recto_file, detection_model)
+                annotated_verso, crop_verso = process_single_side("Verso", verso_file, detection_model)
+                
+                st.session_state.annotated_recto = annotated_recto
+                st.session_state.annotated_verso = annotated_verso
 
-                # Logique de décision finale
-                is_visually_conform = recto_result and recto_result["conformity_check"] and verso_result and verso_result["conformity_check"]
+                recto_text, verso_text = None, None
+                if crop_recto:
+                    with io.BytesIO() as buf: crop_recto.save(buf, format='PNG'); recto_text = get_text_from_image_via_ocr(llm_client, buf.getvalue())
+                if crop_verso:
+                    with io.BytesIO() as buf: crop_verso.save(buf, format='PNG'); verso_text = get_text_from_image_via_ocr(llm_client, buf.getvalue())
                 
-                final_report = None
-                if is_visually_conform:
-                    final_report = perform_kyc_analysis(models['llm'], recto_result["data"], verso_result["data"])
+                report = None
+                if recto_text or verso_text:
+                    report = get_kyc_verdict_and_data(llm_client, recto_text, verso_text)
                 
-                # Sauvegarder les résultats pour l'affichage
-                st.session_state.final_report = final_report
-                st.session_state.recto_reason = recto_result["reason"] if recto_result else "Fichier non traité."
-                st.session_state.verso_reason = verso_result["reason"] if verso_result else "Fichier non traité."
+                st.session_state.report = report
 
     with col_results:
-        st.subheader("2. Résultat de la vérification")
-        if 'final_report' in st.session_state:
-            report = st.session_state.final_report
-            
-            # La décision finale combine la conformité visuelle et textuelle
-            is_textually_conform = report and report.get("conformite_textuelle", False)
-            
-            if is_textually_conform:
-                st.success("✅ CNI Présente et Conforme", icon="✅")
-                id_data = report.get("donnees_extraites")
-                if id_data:
-                    display_identity_card(id_data)
-            else:
-                st.error("⚠️ Vérification Manuelle Requise", icon="⚠️")
-                with st.expander("Détails de l'analyse"):
-                    st.markdown(f"**Recto :** {st.session_state.recto_reason}")
-                    st.markdown(f"**Verso :** {st.session_state.verso_reason}")
-                    if report and not report.get("conformite_textuelle"):
-                        st.markdown("**Analyse IA :** La structure textuelle extraite a été jugée non conforme.")
+        st.subheader("2. Résultats")
+        if 'report' in st.session_state and st.session_state.report:
+            report = st.session_state.report
+            verdict = report.get("verdict", "VÉRIFICATION MANUELLE REQUISE")
+            id_data = report.get("donnees_extraites")
+
+            display_verdict(verdict)
+
+            if id_data:
+                display_identity_card(id_data)
+
+            st.markdown("##### Documents Analysés")
+            res_col1, res_col2 = st.columns(2)
+            if 'annotated_recto' in st.session_state: res_col1.image(st.session_state.annotated_recto, caption="Recto", channels="BGR")
+            if 'annotated_verso' in st.session_state: res_col2.image(st.session_state.annotated_verso, caption="Verso", channels="BGR")
+        
+        elif 'annotated_recto' in st.session_state or 'annotated_verso' in st.session_state:
+             # Gère le cas où la détection a fonctionné mais l'OCR/LLM a échoué
+            st.warning("⚠️ Vérification Manuelle Requise", icon="❗")
+            st.markdown("La détection a fonctionné, mais les données n'ont pas pu être extraites ou validées.")
+            st.markdown("##### Documents Analysés")
+            res_col1, res_col2 = st.columns(2)
+            if 'annotated_recto' in st.session_state: res_col1.image(st.session_state.annotated_recto, caption="Recto", channels="BGR")
+            if 'annotated_verso' in st.session_state: res_col2.image(st.session_state.annotated_verso, caption="Verso", channels="BGR")
         else:
             st.info("Les résultats de la vérification apparaîtront ici.")
 
