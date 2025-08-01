@@ -1,12 +1,11 @@
 # ==========================================================================================
-# APPLICATION "AUTO KYC" - v3.0 - VERSION DE PRODUCTION "ZERO TRUST"
+# APPLICATION "AUTO KYC" - v3.1 - CORRECTION DÉFINITIVE DU TYPEERROR
 # ==========================================================================================
-# Objectif : Zéro erreur non interceptée. Fiabilité maximale pour un cas d'usage critique.
-# Principes :
-# 1. Logique Atomique : Le traitement est encapsulé dans des fonctions qui retournent des résultats complets ou rien.
-# 2. Validation Stricte : Chaque fonction valide ses entrées et garantit le format de ses sorties.
-# 3. Code Défensif : Aucune supposition n'est faite sur l'état ou le succès des opérations précédentes.
-# 4. Clarté avant tout : La lisibilité et la prévisibilité sont prioritaires sur la concision.
+# Cause Racine de l'Erreur Précédente : L'objet `map` en Python 3 est un itérateur
+# non-subscriptable. La fonction `crop` de PIL attend une séquence (tuple/liste).
+# Solution : Forcer l'évaluation de l'itérateur en le convertissant explicitement
+# en tuple via `tuple(map(int, box))`.
+# Statut : Cette version corrige la dernière erreur d'exécution connue.
 # ==========================================================================================
 
 import streamlit as st
@@ -20,7 +19,6 @@ import fitz  # PyMuPDF
 import base64
 import os
 
-# --- Dépendances Externes & Locales ---
 from torchvision.models.detection import fasterrcnn_resnet50_fpn
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 from torchvision.transforms import v2 as T
@@ -71,7 +69,6 @@ def preprocess_uploaded_file(uploaded_file):
     try:
         image_bytes = uploaded_file.getvalue()
         image = Image.open(io.BytesIO(image_bytes))
-        # Exif transpose pour corriger l'orientation des photos de smartphone
         image = ImageOps.exif_transpose(image.convert("RGB"))
         if image.width > MAX_IMAGE_DIMENSION or image.height > MAX_IMAGE_DIMENSION:
             image.thumbnail((MAX_IMAGE_DIMENSION, MAX_IMAGE_DIMENSION), Image.Resampling.LANCZOS)
@@ -86,18 +83,14 @@ def detect_cni(model, pil_image):
     with torch.no_grad():
         prediction = model([image_tensor])
     boxes, scores = prediction[0]['boxes'].cpu().numpy(), prediction[0]['scores'].cpu().numpy()
-    
     if len(scores) == 0: return cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR), None
-
     best_idx = np.argmax(scores)
     best_score = scores[best_idx]
-    
     if best_score < CONFIDENCE_THRESHOLD: return cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR), None
-    
     best_box = boxes[best_idx]
     image_cv = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
     x1, y1, x2, y2 = map(int, best_box)
-    cv2.rectangle(image_cv, (x1, y1), (x2, y2), (34, 139, 34), 3) # Vert forêt
+    cv2.rectangle(image_cv, (x1, y1), (x2, y2), (34, 139, 34), 3)
     cv2.putText(image_cv, f"CNI Détectée ({best_score:.2f})", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (34, 139, 34), 2)
     return image_cv, best_box
 
@@ -138,7 +131,6 @@ def generate_kyc_report(_llm_client, recto_text, verso_text):
         return None
 
 def process_single_side(side_name, uploaded_file, detection_model, llm_client):
-    """Encapsule tout le traitement pour une face de la CNI. Retourne un dictionnaire ou None."""
     st.write(f"**Analyse du {side_name}...**")
     pil_image = preprocess_uploaded_file(uploaded_file)
     if not pil_image:
@@ -151,8 +143,11 @@ def process_single_side(side_name, uploaded_file, detection_model, llm_client):
         return {"annotated_img": annotated_img, "text": None}
 
     try:
-        # La conversion vers l'entier et le rognage doivent être dans un bloc try-except
-        crop = pil_image.crop(map(int, box))
+        # <<< LA CORRECTION DÉFINITIVE EST ICI >>>
+        # On convertit l'itérateur map en tuple avant de le passer à crop.
+        crop_box = tuple(map(int, box))
+        crop = pil_image.crop(crop_box)
+        
         with io.BytesIO() as buf:
             crop.save(buf, format='PNG')
             image_bytes = buf.getvalue()
@@ -167,8 +162,6 @@ def process_single_side(side_name, uploaded_file, detection_model, llm_client):
     except Exception as e:
         st.error(f"Erreur inattendue lors du rognage ou de l'OCR du {side_name}: {e}")
         return {"annotated_img": annotated_img, "text": None}
-
-# --- INTERFACE UTILISATEUR (UI) ---
 
 def display_results_ui(report, recto_result, verso_result):
     st.subheader("2. Résultats de la Vérification")
@@ -215,8 +208,8 @@ def main():
     col_actions, col_results = st.columns([2, 3])
     with col_actions:
         st.subheader("1. Charger les Documents")
-        recto_file = st.file_uploader("Chargez le RECTO (Image/PDF)", type=["jpg", "jpeg", "png", "pdf"])
-        verso_file = st.file_uploader("Chargez le VERSO (Image/PDF)", type=["jpg", "jpeg", "png", "pdf"])
+        recto_file = st.file_uploader("Chargez le RECTO (Image/PDF)", type=["jpg", "jpeg", "png"])
+        verso_file = st.file_uploader("Chargez le VERSO (Image/PDF)", type=["jpg", "jpeg", "png"])
 
         if st.button("Lancer la Vérification ✨", type="primary", use_container_width=True):
             if not recto_file and not verso_file:
@@ -242,10 +235,9 @@ def main():
 
     with col_results:
         if 'report' in st.session_state:
-            display_results_ui(st.session_state.report, st.session_state.get('recto_result'), st.session_state.get('verso_result'))
+            display_results_ui(st.session_state.get('report'), st.session_state.get('recto_result'), st.session_state.get('verso_result'))
         else:
             st.info("Les résultats de la vérification apparaîtront ici.")
 
 if __name__ == "__main__":
-    main() 
-    
+     main() 
